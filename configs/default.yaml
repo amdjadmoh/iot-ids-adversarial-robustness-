@@ -1,0 +1,96 @@
+# Single source of truth for experiment parameters.
+# Entry points: python -m src.<module> --config configs/default.yaml
+
+seed: 42
+deterministic: true
+
+data:
+  raw_dir: data/raw
+  file_glob: "*.csv"
+  label_column: Label
+  # Maximum number of rows kept after loading; null keeps every row.
+  sample_size: 200000
+  # Sample within each label/file group so rare attack types survive sampling.
+  stratify_by: [Label, source_file]
+  drop_columns: []
+
+labels:
+  multiclass: 34        # 33 attack types + Benign
+  family: 8             # 7 attack categories + Benign
+  binary: 2             # Benign vs Attack
+
+split:
+  val_fraction: 0.15
+  test_fraction: 0.15
+  # Keep all rows from a capture file in one split when possible.
+  holdout_by_capture: true
+
+preprocessing:
+  scale_for_mlp: true
+  scaler: standard
+  clip_after_scaling: 8.0
+
+models:
+  random_forest:
+    n_estimators: 300
+    max_depth: null
+    min_samples_leaf: 2
+    n_jobs: -1
+    random_state: 42
+
+  xgboost:
+    n_estimators: 400
+    max_depth: 6
+    learning_rate: 0.1
+    subsample: 0.9
+    colsample_bytree: 0.9
+    n_jobs: -1
+    random_state: 42
+
+  mlp:
+    hidden_dims: [128, 64]
+    dropout: 0.2
+    batch_size: 512
+    epochs: 30
+    learning_rate: 0.001
+    weight_decay: 0.0001
+
+attacks:
+  # Unconstrained gradient attacks on the MLP, in scaled feature space.
+  fgsm:
+    epsilons: [0.005, 0.01, 0.02, 0.05, 0.1]
+  pgd:
+    epsilons: [0.005, 0.01, 0.02, 0.05, 0.1]
+    steps: 20
+    step_size_factor: 0.25
+
+  # Feature-constrained attacks: only attacker-controllable features may move.
+  constrained:
+    epsilons: [0.01, 0.02, 0.05, 0.1]
+    steps: 20
+    step_size_factor: 0.25
+    # Maximum fraction of each feature's observed valid range that may change.
+    max_feature_delta: 0.25
+
+  # Model-agnostic search used directly against trees.
+  black_box:
+    queries: 500
+    max_features_per_query: 3
+
+defenses:
+  adversarial_training:
+    epsilons: [0.01, 0.02]
+    epochs: 20
+    clean_fraction: 0.5
+
+  feature_squeezing:
+    bit_depths: [8, 6, 4]
+
+evaluation:
+  batch_size: 4096
+  metrics: [accuracy, macro_f1, per_class_recall]
+  save_confusion_matrix: true
+
+paths:
+  results: results
+  figures: figures

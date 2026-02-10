@@ -1,0 +1,36 @@
+# Dataset (downloaded locally; never commit)
+data/
+*.pcap
+*.pcapng
+*.zip
+*.7z
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# Model artifacts
+*.pt
+*.pth
+*.pkl
+*.joblib
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Editors and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

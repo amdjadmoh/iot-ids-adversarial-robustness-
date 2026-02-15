@@ -118,6 +118,9 @@ def _family_for_label(label: str) -> str:
 FAMILY_BY_LABEL: dict[str, str] = {
     label: _family_for_label(label) for label in MULTICLASS_LABELS
 }
+FAMILY_TO_INDEX: dict[str, int] = {
+    name: index for index, name in enumerate(FAMILY_NAMES)
+}
 LABEL_TO_INDEX: dict[str, int] = {
     label: index for index, label in enumerate(MULTICLASS_LABELS)
 }

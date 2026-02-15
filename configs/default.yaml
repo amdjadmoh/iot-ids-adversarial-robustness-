@@ -7,6 +7,7 @@ deterministic: true
 data:
   raw_dir: data/raw
   processed_dir: data/processed
+  models_dir: data/models
   file_glob: "*.csv"
   label_column: Label
   # Maximum number of rows kept after loading; null keeps every row.
@@ -89,8 +90,10 @@ defenses:
     bit_depths: [8, 6, 4]
 
 evaluation:
+  targets: [multiclass, family, binary]
+  models: [random_forest, xgboost, mlp]
   batch_size: 4096
-  metrics: [accuracy, macro_f1, per_class_recall]
+  metrics: [accuracy, macro_f1, weighted_f1, macro_recall]
   save_confusion_matrix: true
 
 paths:

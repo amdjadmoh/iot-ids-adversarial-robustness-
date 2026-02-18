@@ -1,0 +1,105 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pandas as pd
+
+from src.plots import generate_all
+
+
+def _write_resources(results: Path) -> None:
+    targets = ["multiclass", "family", "binary"]
+    models = ["random_forest", "xgboost", "mlp"]
+    baseline_rows = []
+    recall_rows = []
+    attack_rows = []
+    for target in targets:
+        for model in models:
+            for split in ("val", "test"):
+                baseline_rows.append(
+                    {
+                        "target": target,
+                        "model": model,
+                        "split": split,
+                        "n_samples": 30,
+                        "accuracy": 0.8,
+                        "macro_f1": 0.7,
+                        "weighted_f1": 0.78,
+                        "macro_recall": 0.72,
+                    }
+                )
+            for class_id, class_name in enumerate(("a", "b", "c")):
+                recall_rows.append(
+                    {
+                        "target": target,
+                        "model": model,
+                        "split": "test",
+                        "class_id": class_id,
+                        "class_name": class_name,
+                        "support": 10,
+                        "recall": 0.5 + 0.1 * class_id,
+                    }
+                )
+            for attack in ("fgsm", "pgd"):
+                for epsilon in (0.01, 0.02):
+                    attack_rows.append(
+                        {
+                            "target": target,
+                            "model": model,
+                            "attack": attack,
+                            "epsilon": epsilon,
+                            "n_samples": 30,
+                            "clean_accuracy": 0.8,
+                            "adversarial_accuracy": 0.8 - epsilon,
+                            "accuracy_drop": epsilon,
+                            "clean_macro_f1": 0.7,
+                            "adversarial_macro_f1": 0.7 - epsilon,
+                            "macro_f1_drop": epsilon,
+                            "clean_macro_recall": 0.72,
+                            "adversarial_macro_recall": 0.72 - epsilon,
+                            "macro_recall_drop": epsilon,
+                            "attack_success_rate": 0.2,
+                        }
+                    )
+    pd.DataFrame(baseline_rows).to_csv(
+        results / "baselines_metrics.csv",
+        index=False,
+    )
+    pd.DataFrame(recall_rows).to_csv(
+        results / "baselines_per_class_recall.csv",
+        index=False,
+    )
+    pd.DataFrame(attack_rows).to_csv(results / "attack_metrics.csv", index=False)
+
+    confusion_dir = results / "confusion_matrices"
+    confusion_dir.mkdir()
+    matrix = pd.DataFrame(
+        [[5, 1, 0], [0, 4, 2], [1, 0, 3]],
+        index=["a", "b", "c"],
+        columns=["a", "b", "c"],
+    )
+    matrix.to_csv(confusion_dir / "multiclass_mlp_test.csv")
+    matrix.to_csv(confusion_dir / "family_xgboost_test.csv")
+
+
+def test_generate_all_writes_every_supported_figure(tmp_path: Path) -> None:
+    results = tmp_path / "results"
+    figures = tmp_path / "figures"
+    results.mkdir()
+    _write_resources(results)
+
+    paths = generate_all(results, figures)
+
+    assert len(paths) == 2 + 3 + 2 + 6
+    assert all(path.exists() for path in paths)
+    assert all(path.stat().st_size > 0 for path in paths)
+
+
+def test_generate_all_skips_missing_inputs(tmp_path: Path) -> None:
+    results = tmp_path / "results"
+    figures = tmp_path / "figures"
+    results.mkdir()
+
+    paths = generate_all(results, figures)
+
+    assert paths == []

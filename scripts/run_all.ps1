@@ -7,6 +7,7 @@ if (-not (Test-Path -LiteralPath $python)) {
     throw "Virtual environment not found at .venv. Create it and install requirements first."
 }
 
+& $python -m src.data --config configs/default.yaml
 & $python -m src.train --config configs/default.yaml
 & $python -m src.attacks --config configs/default.yaml
 & $python -m src.defenses --config configs/default.yaml

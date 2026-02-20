@@ -92,6 +92,9 @@ def test_worst_case_attack_summary_reports_extremes() -> None:
                 "clean_macro_f1": 0.85,
                 "adversarial_macro_f1": 0.75,
                 "macro_f1_drop": 0.1,
+                "clean_macro_recall": 0.8,
+                "adversarial_macro_recall": 0.7,
+                "macro_recall_drop": 0.1,
                 "attack_success_rate": 0.2,
             },
             {
@@ -105,6 +108,9 @@ def test_worst_case_attack_summary_reports_extremes() -> None:
                 "clean_macro_f1": 0.85,
                 "adversarial_macro_f1": 0.3,
                 "macro_f1_drop": 0.55,
+                "clean_macro_recall": 0.8,
+                "adversarial_macro_recall": 0.25,
+                "macro_recall_drop": 0.55,
                 "attack_success_rate": 0.7,
             },
         ]
@@ -149,6 +155,9 @@ def test_write_summary_writes_traceable_files(tmp_path: Path) -> None:
                 "clean_macro_f1": 0.8,
                 "adversarial_macro_f1": 0.2,
                 "macro_f1_drop": 0.6,
+                "clean_macro_recall": 0.8,
+                "adversarial_macro_recall": 0.2,
+                "macro_recall_drop": 0.6,
                 "attack_success_rate": 0.7,
             }
         ]

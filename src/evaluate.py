@@ -134,6 +134,9 @@ def worst_case_attack_summary(frame: pd.DataFrame) -> pd.DataFrame:
         "clean_macro_f1",
         "adversarial_macro_f1",
         "macro_f1_drop",
+        "clean_macro_recall",
+        "adversarial_macro_recall",
+        "macro_recall_drop",
         "attack_success_rate",
     }
     missing = sorted(required - set(frame.columns))
@@ -163,6 +166,15 @@ def worst_case_attack_summary(frame: pd.DataFrame) -> pd.DataFrame:
                     group["adversarial_macro_f1"].min()
                 ),
                 "max_macro_f1_drop": float(group["macro_f1_drop"].max()),
+                "clean_macro_recall": float(
+                    group["clean_macro_recall"].iloc[0]
+                ),
+                "worst_macro_recall": float(
+                    group["adversarial_macro_recall"].min()
+                ),
+                "max_macro_recall_drop": float(
+                    group["macro_recall_drop"].max()
+                ),
                 "max_attack_success_rate": float(
                     group["attack_success_rate"].max()
                 ),

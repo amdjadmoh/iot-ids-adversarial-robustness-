@@ -23,6 +23,7 @@ LOGGER = logging.getLogger(__name__)
 TARGET_ORDER = ("multiclass", "family", "binary")
 MODEL_ORDER = ("random_forest", "xgboost", "mlp")
 ATTACK_ORDER = ("fgsm", "pgd")
+DEFENSE_ORDER = ("adversarial_training", "feature_squeezing")
 
 
 def _ordered_present(values: Iterable[str], order: tuple[str, ...]) -> list[str]:
@@ -192,6 +193,80 @@ def plot_attack_curves(results_dir: Path, figures_dir: Path) -> list[Path]:
     return paths
 
 
+def plot_defense_tradeoff(results_dir: Path, figures_dir: Path) -> list[Path]:
+    path = results_dir / "defense_metrics.csv"
+    if not path.exists():
+        LOGGER.warning("Skipping defense trade-off; %s is missing", path)
+        return []
+    frame = pd.read_csv(path)
+    paths: list[Path] = []
+    for target in _ordered_present(frame["target"], TARGET_ORDER):
+        subset = frame[
+            (frame["target"] == target) & (frame["model"] == "mlp")
+        ]
+        if subset.empty:
+            continue
+        labels: list[str] = []
+        clean_values: list[float] = []
+        adversarial_values: list[float] = []
+        for (defense, parameter), group in sorted(
+            subset.groupby(["defense", "defense_param"]),
+            key=lambda item: (
+                DEFENSE_ORDER.index(item[0][0])
+                if item[0][0] in DEFENSE_ORDER
+                else len(DEFENSE_ORDER),
+                item[0][1],
+            ),
+        ):
+            clean_rows = group[group["attack"] == "clean"]
+            pgd_rows = group[group["attack"] == "pgd"]
+            if clean_rows.empty or pgd_rows.empty:
+                continue
+            if defense == "adversarial_training":
+                label = f"adv train eps={parameter:g}"
+            elif defense == "feature_squeezing":
+                label = f"squeeze {int(parameter)}-bit"
+            else:
+                label = f"{defense} {parameter:g}"
+            labels.append(label)
+            clean_values.append(
+                float(clean_rows["clean_accuracy"].iloc[0])
+            )
+            adversarial_values.append(
+                float(pgd_rows["adversarial_accuracy"].min())
+            )
+        if not labels:
+            continue
+
+        positions = np.arange(len(labels))
+        width = 0.38
+        figure, axis = plt.subplots(
+            figsize=(max(7.0, 1.8 * len(labels)), 4.5)
+        )
+        axis.bar(
+            positions - width / 2,
+            clean_values,
+            width,
+            label="Clean accuracy",
+        )
+        axis.bar(
+            positions + width / 2,
+            adversarial_values,
+            width,
+            label="Worst PGD accuracy",
+        )
+        axis.set_xticks(positions)
+        axis.set_xticklabels(labels, rotation=20, ha="right")
+        axis.set_ylabel("Accuracy")
+        axis.set_ylim(0.0, 1.0)
+        axis.set_title(f"Defense trade-off ({target})")
+        axis.legend(fontsize=8)
+        paths.append(
+            _save(figure, figures_dir / f"defense_tradeoff_{target}.png")
+        )
+    return paths
+
+
 def generate_all(results_dir: Path, figures_dir: Path) -> list[Path]:
     """Generate every figure supported by the result files that exist."""
     figures_dir.mkdir(parents=True, exist_ok=True)
@@ -200,6 +275,7 @@ def generate_all(results_dir: Path, figures_dir: Path) -> list[Path]:
     paths.extend(plot_per_class_recall(results_dir, figures_dir))
     paths.extend(plot_confusion_matrices(results_dir, figures_dir))
     paths.extend(plot_attack_curves(results_dir, figures_dir))
+    paths.extend(plot_defense_tradeoff(results_dir, figures_dir))
     return paths
 
 

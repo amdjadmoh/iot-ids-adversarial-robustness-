@@ -71,6 +71,42 @@ def _write_resources(results: Path) -> None:
     )
     pd.DataFrame(attack_rows).to_csv(results / "attack_metrics.csv", index=False)
 
+    defense_rows = []
+    for target in targets:
+        for defense, parameter, clean_accuracy, adversarial_accuracy in (
+            ("adversarial_training", 0.01, 0.72, 0.55),
+            ("feature_squeezing", 8.0, 0.79, 0.60),
+            ("feature_squeezing", 4.0, 0.75, 0.65),
+        ):
+            defense_rows.append(
+                {
+                    "target": target,
+                    "defense": defense,
+                    "defense_param": parameter,
+                    "model": "mlp",
+                    "attack": "clean",
+                    "epsilon": 0.0,
+                    "clean_accuracy": clean_accuracy,
+                    "adversarial_accuracy": clean_accuracy,
+                }
+            )
+            defense_rows.append(
+                {
+                    "target": target,
+                    "defense": defense,
+                    "defense_param": parameter,
+                    "model": "mlp",
+                    "attack": "pgd",
+                    "epsilon": 0.05,
+                    "clean_accuracy": clean_accuracy,
+                    "adversarial_accuracy": adversarial_accuracy,
+                }
+            )
+    pd.DataFrame(defense_rows).to_csv(
+        results / "defense_metrics.csv",
+        index=False,
+    )
+
     confusion_dir = results / "confusion_matrices"
     confusion_dir.mkdir()
     matrix = pd.DataFrame(
@@ -90,7 +126,7 @@ def test_generate_all_writes_every_supported_figure(tmp_path: Path) -> None:
 
     paths = generate_all(results, figures)
 
-    assert len(paths) == 2 + 3 + 2 + 6
+    assert len(paths) == 2 + 3 + 2 + 6 + 3
     assert all(path.exists() for path in paths)
     assert all(path.stat().st_size > 0 for path in paths)
 

@@ -32,6 +32,7 @@ LOGGER = logging.getLogger(__name__)
 
 NON_FEATURE_COLUMNS = {
     "Label",
+    "label",
     "source_file",
     "split",
     "label_multiclass",

@@ -73,6 +73,14 @@ def test_resolve_features_rejects_unknown_columns() -> None:
         resolve_features(frame)
 
 
+def test_resolve_features_ignores_lowercase_label_column() -> None:
+    frame = pd.DataFrame({name: [0.0] for name in FEATURE_NAMES})
+    frame["label"] = "BenignTraffic"
+    frame["split"] = "train"
+
+    assert resolve_features(frame) == list(FEATURE_NAMES)
+
+
 def test_target_arrays_maps_family_names() -> None:
     frame = pd.DataFrame(
         {

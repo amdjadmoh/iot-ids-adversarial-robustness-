@@ -194,3 +194,26 @@ def test_loader_strips_whitespace_from_headers(
 
     assert "Label" in frame.columns
     assert frame["label_multiclass"].eq(BENIGN_LABEL).all()
+
+
+def test_loader_strips_byte_order_mark_from_headers(
+    config: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "bom"
+    directory.mkdir()
+    pd.DataFrame(
+        {
+            "\ufefffeature_a": [1.0, 2.0, 3.0],
+            "label": [BENIGN_LABEL] * 3,
+        }
+    ).to_csv(directory / "benign.csv", index=False)
+
+    config["data"]["raw_dir"] = str(directory)
+    config["data"]["label_column"] = "label"
+    config["data"]["sample_size"] = 3
+
+    frame = load_ciciot2023(config)
+
+    assert "feature_a" in frame.columns
+    assert frame["label_multiclass"].eq(BENIGN_LABEL).all()

@@ -164,7 +164,9 @@ def discover_csv_files(raw_dir: str | Path, pattern: str = "*.csv") -> list[Path
 
 
 def _clean_columns(frame: pd.DataFrame) -> pd.DataFrame:
-    frame.columns = [str(column).strip() for column in frame.columns]
+    frame.columns = [
+        str(column).strip().lstrip("\ufeff") for column in frame.columns
+    ]
     return frame
 
 

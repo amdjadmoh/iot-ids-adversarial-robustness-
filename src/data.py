@@ -239,8 +239,10 @@ def sample_file(
     target_rows: int,
     seed: int,
     chunksize: int,
+    label_column: str = "Label",
+    min_per_class: int = 2,
 ) -> pd.DataFrame:
-    """Uniformly sample ``target_rows`` rows from one CSV using bounded memory."""
+    """Sample ``target_rows`` rows from one CSV using bounded memory with rare-class protection."""
     if target_rows <= 0:
         raise ValueError("target_rows must be positive")
 
@@ -254,9 +256,26 @@ def sample_file(
             combined = pd.concat([reservoir, chunk], ignore_index=True)
 
         if len(combined) > target_rows:
-            keys = rng.random(len(combined))
-            keep = np.argpartition(keys, target_rows - 1)[:target_rows]
-            combined = combined.iloc[np.sort(keep)].reset_index(drop=True)
+            # Guarantee rare classes retain at least `min_per_class` rows if available
+            actual_lbl_col = _find_label_column(combined.columns, label_column)
+            keep_indices = set()
+            grouped = combined.groupby(actual_lbl_col, observed=True)
+            for _, grp in grouped:
+                if len(grp) <= min_per_class:
+                    keep_indices.update(grp.index)
+                else:
+                    sample_idx = rng.choice(grp.index, size=min_per_class, replace=False)
+                    keep_indices.update(sample_idx)
+
+            remaining_slots = target_rows - len(keep_indices)
+            if remaining_slots > 0:
+                other_indices = combined.index.difference(list(keep_indices))
+                sampled_other = rng.choice(other_indices, size=min(remaining_slots, len(other_indices)), replace=False)
+                final_keep = np.sort(np.concatenate([list(keep_indices), sampled_other]))
+            else:
+                final_keep = np.sort(list(keep_indices)[:target_rows])
+
+            combined = combined.iloc[final_keep].reset_index(drop=True)
         reservoir = combined
 
     if reservoir is None:
@@ -270,6 +289,7 @@ def _sample_files(
     sample_size: int | None,
     seed: int,
     chunksize: int,
+    label_column: str = "Label",
 ) -> pd.DataFrame:
     total_rows = sum(stats[path].rows for path in files)
     if sample_size is not None and sample_size <= 0:
@@ -295,6 +315,7 @@ def _sample_files(
             target_rows=targets[path],
             seed=seed + index,
             chunksize=chunksize,
+            label_column=label_column,
         )
         frame["source_file"] = path.name
         frames.append(frame)
@@ -335,6 +356,7 @@ def load_ciciot2023(config: dict[str, Any]) -> pd.DataFrame:
         sample_size=data_cfg.get("sample_size"),
         seed=int(config["seed"]),
         chunksize=chunksize,
+        label_column=label_column,
     )
     frame = _clean_columns(frame)
     actual_label_column = _find_label_column(frame.columns, label_column)
@@ -459,6 +481,24 @@ def split_dataset(
 
     rng = np.random.default_rng(int(config["seed"]))
     parts: list[pd.DataFrame] = []
+
+    # If files are named train.csv, validation.csv/val.csv, test.csv, adopt their natural splits
+    file_stems = {str(name): Path(str(name)).stem.lower() for name in frame["source_file"].unique()}
+    named_splits = {"train": "train", "val": "val", "validation": "val", "test": "test"}
+    has_canonical_split_names = set(file_stems.values()).issubset({"train", "val", "validation", "test"}) and len(file_stems) >= 2
+
+    if has_canonical_split_names:
+        LOGGER.info("Adopting existing pre-split file roles: %s", file_stems)
+        parts = []
+        for file_name, stem in file_stems.items():
+            assigned_split = named_splits[stem]
+            file_part = frame[frame["source_file"] == file_name].copy()
+            file_part["split"] = assigned_split
+            parts.append(file_part)
+        result = pd.concat(parts, ignore_index=True)
+        counts = result["split"].value_counts().to_dict()
+        LOGGER.info("Split sizes: %s", counts)
+        return result
 
     if not bool(split_cfg.get("holdout_by_capture", True)):
         for _, group in frame.groupby("label_multiclass", sort=True):

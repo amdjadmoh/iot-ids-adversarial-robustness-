@@ -1,4 +1,4 @@
-"""White-box FGSM/PGD evasion and transfer evaluation on the MLP detector."""
+"""White-box (unconstrained FGSM/PGD, feature-constrained) and transfer evasion."""
 
 from __future__ import annotations
 
@@ -15,7 +15,9 @@ import torch
 from torch import nn
 
 from src.config import configure_logging, load_config, set_seed
+from src.constraints import project_feature_constraints
 from src.evaluate import compute_metrics, per_class_recall_frame
+from src.features import FEATURE_NAMES
 from src.models import load_mlp
 from src.train import (
     MODEL_NAMES,
@@ -30,7 +32,7 @@ from src.train import (
 
 LOGGER = logging.getLogger(__name__)
 
-ATTACK_NAMES = ("fgsm", "pgd")
+ATTACK_NAMES = ("fgsm", "pgd", "constrained")
 
 
 def _replace_non_finite(frame: pd.DataFrame) -> pd.DataFrame:
@@ -169,6 +171,110 @@ def pgd_attack(
     return np.concatenate(batches, axis=0).astype(np.float32)
 
 
+def constrained_pgd_attack(
+    model: nn.Module,
+    scaled_features: np.ndarray,
+    original_raw: np.ndarray,
+    labels: np.ndarray,
+    epsilon: float,
+    steps: int,
+    preprocessor: Preprocessor,
+    raw_lower: np.ndarray,
+    raw_upper: np.ndarray,
+    scaled_lower: np.ndarray,
+    scaled_upper: np.ndarray,
+    step_size_factor: float = 0.25,
+    max_feature_delta: float | None = 0.25,
+    batch_size: int = 4096,
+    device: torch.device | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Generate feature-constrained adversarial examples adhering to threat-model rules.
+
+    Each step computes gradients in scaled feature space, updates controllable features,
+    inverts to raw space, projects onto physical and threat-model constraints, and
+    re-scales.
+
+    Returns:
+        tuple (adversarial_scaled, adversarial_raw)
+    """
+    if epsilon <= 0:
+        raise ValueError("epsilon must be positive")
+    if steps <= 0:
+        raise ValueError("steps must be positive")
+
+    device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.eval()
+    step_size = epsilon * step_size_factor
+
+    batches_scaled: list[np.ndarray] = []
+    batches_raw: list[np.ndarray] = []
+
+    for start in range(0, len(scaled_features), batch_size):
+        end = start + batch_size
+        batch_scaled_orig = scaled_features[start:end]
+        batch_raw_orig = original_raw[start:end]
+        batch_labels = labels[start:end]
+
+        current_scaled = batch_scaled_orig.copy()
+        current_raw = batch_raw_orig.copy()
+
+        labels_tensor = torch.as_tensor(batch_labels, dtype=torch.long, device=device)
+        orig_scaled_tensor = torch.as_tensor(batch_scaled_orig, dtype=torch.float32, device=device)
+
+        for _ in range(steps):
+            tensor_scaled = torch.as_tensor(
+                current_scaled, dtype=torch.float32, device=device
+            ).requires_grad_(True)
+            loss = _batch_loss(model(tensor_scaled), labels_tensor)
+            gradient = torch.autograd.grad(loss, tensor_scaled)[0]
+
+            with torch.no_grad():
+                step_tensor = tensor_scaled + step_size * gradient.sign()
+                # L-infinity clamp to epsilon in scaled space
+                step_tensor = torch.max(
+                    torch.min(step_tensor, orig_scaled_tensor + epsilon),
+                    orig_scaled_tensor - epsilon,
+                )
+                step_scaled_np = step_tensor.cpu().numpy()
+
+            # Invert to raw feature space
+            raw_unprojected = preprocessor.scaler.inverse_transform(
+                step_scaled_np.astype(np.float64)
+            )
+
+            # Project onto realistic threat model & physical constraints
+            projected_raw = project_feature_constraints(
+                adversarial_raw=raw_unprojected,
+                original_raw=batch_raw_orig,
+                feature_names=preprocessor.features,
+                raw_lower=raw_lower,
+                raw_upper=raw_upper,
+                max_feature_delta=max_feature_delta,
+            )
+
+            # Re-scale back to model input space
+            scaled_reprojected = preprocessor.scaler.transform(
+                projected_raw.astype(np.float64)
+            )
+            if preprocessor.clip_value is not None:
+                scaled_reprojected = np.clip(
+                    scaled_reprojected,
+                    -preprocessor.clip_value,
+                    preprocessor.clip_value,
+                )
+
+            current_raw = projected_raw.astype(np.float32)
+            current_scaled = scaled_reprojected.astype(np.float32)
+
+        batches_scaled.append(current_scaled)
+        batches_raw.append(current_raw)
+
+    return (
+        np.concatenate(batches_scaled, axis=0).astype(np.float32),
+        np.concatenate(batches_raw, axis=0).astype(np.float32),
+    )
+
+
 def attack_success_rate(
     clean_predictions: np.ndarray,
     adversarial_predictions: np.ndarray,
@@ -226,41 +332,72 @@ def invert_and_clip(
 def _generate_attack(
     attack_name: str,
     model: nn.Module,
-    features: np.ndarray,
+    features_scaled: np.ndarray,
+    features_raw: np.ndarray,
     labels: np.ndarray,
     epsilon: float,
-    bounds: tuple[np.ndarray, np.ndarray],
+    scaled_bounds: tuple[np.ndarray, np.ndarray],
+    raw_bounds: tuple[np.ndarray, np.ndarray],
+    preprocessor: Preprocessor,
     config: dict[str, Any],
     device: torch.device,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     batch_size = int(config.get("evaluation", {}).get("batch_size", 4096))
-    lower, upper = bounds
+    lower_s, upper_s = scaled_bounds
+    lower_r, upper_r = raw_bounds
+
     if attack_name == "fgsm":
-        return fgsm_attack(
+        adv_scaled = fgsm_attack(
             model,
-            features,
+            features_scaled,
             labels,
             epsilon=epsilon,
-            clip_min=lower,
-            clip_max=upper,
+            clip_min=lower_s,
+            clip_max=upper_s,
             batch_size=batch_size,
             device=device,
         )
+        adv_raw = invert_and_clip(adv_scaled, preprocessor, lower_r, upper_r)
+        return adv_scaled, adv_raw
+
     if attack_name == "pgd":
         params = config["attacks"]["pgd"]
-        return pgd_attack(
+        adv_scaled = pgd_attack(
             model,
-            features,
+            features_scaled,
             labels,
             epsilon=epsilon,
             steps=int(params["steps"]),
-            clip_min=lower,
-            clip_max=upper,
+            clip_min=lower_s,
+            clip_max=upper_s,
             step_size_factor=float(params.get("step_size_factor", 0.25)),
             random_start=bool(params.get("random_start", True)),
             batch_size=batch_size,
             device=device,
         )
+        adv_raw = invert_and_clip(adv_scaled, preprocessor, lower_r, upper_r)
+        return adv_scaled, adv_raw
+
+    if attack_name == "constrained":
+        params = config["attacks"]["constrained"]
+        return constrained_pgd_attack(
+            model,
+            scaled_features=features_scaled,
+            original_raw=features_raw,
+            labels=labels,
+            epsilon=epsilon,
+            steps=int(params["steps"]),
+            preprocessor=preprocessor,
+            raw_lower=lower_r,
+            raw_upper=upper_r,
+            scaled_lower=lower_s,
+            scaled_upper=upper_s,
+            step_size_factor=float(params.get("step_size_factor", 0.25)),
+            max_feature_delta=params.get("max_feature_delta", 0.25),
+            batch_size=batch_size,
+            device=device,
+        )
+
     raise ValueError(f"Unknown attack: {attack_name!r}")
 
 
@@ -375,22 +512,20 @@ def run(
                     attack_name,
                     epsilon,
                 )
-                adversarial_scaled = _generate_attack(
+                adversarial_scaled, adversarial_raw = _generate_attack(
                     attack_name,
                     mlp,
                     test_scaled,
+                    test_tree,
                     labels,
                     float(epsilon),
                     scaled_bounds,
+                    raw_bounds,
+                    preprocessor,
                     config,
                     device,
                 )
-                adversarial_raw = invert_and_clip(
-                    adversarial_scaled,
-                    preprocessor,
-                    raw_bounds[0],
-                    raw_bounds[1],
-                )
+
                 adversarial_predictions = {
                     "mlp": predict_mlp(
                         mlp,
@@ -530,7 +665,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         nargs="+",
         choices=ATTACK_NAMES,
         default=None,
-        help="Attack families to run (default: fgsm and pgd).",
+        help="Attack families to run (default: fgsm, pgd, constrained).",
     )
     return parser.parse_args(argv)
 

@@ -1,0 +1,94 @@
+{
+  "seed": 42,
+  "features": [
+    "flow_duration",
+    "Header_Length",
+    "Protocol Type",
+    "Duration",
+    "Rate",
+    "Srate",
+    "Drate",
+    "fin_flag_number",
+    "syn_flag_number",
+    "rst_flag_number",
+    "psh_flag_number",
+    "ack_flag_number",
+    "ece_flag_number",
+    "cwr_flag_number",
+    "ack_count",
+    "syn_count",
+    "fin_count",
+    "urg_count",
+    "rst_count",
+    "HTTP",
+    "HTTPS",
+    "DNS",
+    "Telnet",
+    "SMTP",
+    "SSH",
+    "IRC",
+    "TCP",
+    "UDP",
+    "DHCP",
+    "ARP",
+    "ICMP",
+    "IPv",
+    "LLC",
+    "Tot sum",
+    "Min",
+    "Max",
+    "AVG",
+    "Std",
+    "Tot size",
+    "IAT",
+    "Number",
+    "Magnitue",
+    "Radius",
+    "Covariance",
+    "Variance",
+    "Weight"
+  ],
+  "targets": [
+    "multiclass",
+    "family",
+    "binary"
+  ],
+  "models": [
+    "random_forest",
+    "xgboost",
+    "mlp"
+  ],
+  "attacks": [
+    "fgsm",
+    "pgd",
+    "constrained"
+  ],
+  "epsilons": {
+    "fgsm": [
+      0.005,
+      0.01,
+      0.02,
+      0.05,
+      0.1
+    ],
+    "pgd": [
+      0.005,
+      0.01,
+      0.02,
+      0.05,
+      0.1
+    ],
+    "constrained": [
+      0.01,
+      0.02,
+      0.05,
+      0.1
+    ]
+  },
+  "pgd_steps": 20,
+  "pgd_step_size_factor": 0.25,
+  "pgd_random_start": true,
+  "bounds": "training_min_max",
+  "device": "cuda",
+  "test_rows": 30000
+}

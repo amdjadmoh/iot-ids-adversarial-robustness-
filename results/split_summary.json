@@ -1,0 +1,22 @@
+{
+  "seed": 42,
+  "requested_sample_size": 200000,
+  "sampled_rows": 200000,
+  "splits": {
+    "train": {
+      "rows": 140000,
+      "classes": 34,
+      "capture_files": 1
+    },
+    "val": {
+      "rows": 30000,
+      "classes": 34,
+      "capture_files": 1
+    },
+    "test": {
+      "rows": 30000,
+      "classes": 34,
+      "capture_files": 1
+    }
+  }
+}

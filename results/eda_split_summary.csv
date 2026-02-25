@@ -1,0 +1,4 @@
+,rows,classes,families,capture_files
+train,140000,34,8,1
+val,30000,34,8,1
+test,30000,34,8,1

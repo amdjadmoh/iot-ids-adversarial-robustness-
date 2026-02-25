@@ -1,0 +1,9 @@
+family,count
+Benign,3322
+BruteForce,42
+DDoS,101808
+DoS,24284
+Mirai,7902
+Recon,1079
+Spoofing,1497
+Web,66

@@ -12,6 +12,7 @@ from src.attacks import (
     fgsm_attack,
     invert_and_clip,
     pgd_attack,
+    random_noise_attack,
     raw_feature_bounds,
     scaled_feature_bounds,
 )
@@ -106,6 +107,55 @@ def test_pgd_rejects_zero_epsilon() -> None:
             clip_max=1.0,
             device=torch.device("cpu"),
         )
+
+
+def test_random_noise_respects_epsilon_and_bounds() -> None:
+    features, _ = _data()
+    lower = np.full(3, -0.5, dtype=np.float32)
+    upper = np.full(3, 0.5, dtype=np.float32)
+
+    adversarial = random_noise_attack(
+        features,
+        epsilon=0.1,
+        clip_min=lower,
+        clip_max=upper,
+        seed=7,
+        batch_size=4,
+    )
+
+    assert adversarial.shape == features.shape
+    assert np.all(np.abs(adversarial - features) <= 0.1 + 1e-6)
+    assert np.all(adversarial >= lower - 1e-6)
+    assert np.all(adversarial <= upper + 1e-6)
+
+
+def test_random_noise_is_reproducible_with_the_same_seed() -> None:
+    features, _ = _data()
+
+    first = random_noise_attack(
+        features, epsilon=0.1, clip_min=-1.0, clip_max=1.0, seed=11
+    )
+    second = random_noise_attack(
+        features, epsilon=0.1, clip_min=-1.0, clip_max=1.0, seed=11
+    )
+    other = random_noise_attack(
+        features, epsilon=0.1, clip_min=-1.0, clip_max=1.0, seed=12
+    )
+
+    assert np.array_equal(first, second)
+    assert not np.array_equal(first, other)
+
+
+def test_random_noise_uses_the_full_epsilon_budget() -> None:
+    features = np.zeros((200, 3), dtype=np.float32)
+
+    adversarial = random_noise_attack(
+        features, epsilon=0.05, clip_min=-1.0, clip_max=1.0, seed=3
+    )
+
+    magnitudes = np.abs(adversarial).ravel()
+    assert np.allclose(magnitudes, 0.05)
+    assert set(np.sign(adversarial).ravel().tolist()) == {-1.0, 1.0}
 
 
 def test_attack_success_rate_uses_initially_correct_rows() -> None:

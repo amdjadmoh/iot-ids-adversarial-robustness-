@@ -10,6 +10,7 @@ from src.evaluate import (
     compute_metrics,
     confusion_matrix_frame,
     per_class_recall_frame,
+    transfer_summary,
     worst_case_attack_summary,
     write_summary,
 )
@@ -126,6 +127,70 @@ def test_worst_case_attack_summary_reports_extremes() -> None:
     assert row["max_attack_success_rate"] == 0.7
 
 
+def _attack_row(
+    *,
+    attack: str,
+    epsilon: float,
+    clean_accuracy: float,
+    adversarial_accuracy: float,
+    model: str = "mlp",
+    target: str = "binary",
+    evasion_rate: float = 0.0,
+) -> dict[str, float | str]:
+    return {
+        "target": target,
+        "model": model,
+        "attack": attack,
+        "epsilon": epsilon,
+        "clean_accuracy": clean_accuracy,
+        "adversarial_accuracy": adversarial_accuracy,
+        "accuracy_drop": clean_accuracy - adversarial_accuracy,
+        "clean_macro_f1": clean_accuracy,
+        "adversarial_macro_f1": adversarial_accuracy,
+        "macro_f1_drop": clean_accuracy - adversarial_accuracy,
+        "clean_macro_recall": clean_accuracy,
+        "adversarial_macro_recall": adversarial_accuracy,
+        "macro_recall_drop": clean_accuracy - adversarial_accuracy,
+        "attack_success_rate": clean_accuracy - adversarial_accuracy,
+        "evasion_rate": evasion_rate,
+        "evasion_population": 100,
+    }
+
+
+def test_transfer_summary_subtracts_the_random_noise_control() -> None:
+    frame = pd.DataFrame(
+        [
+            _attack_row(
+                attack="pgd",
+                epsilon=0.1,
+                clean_accuracy=0.99,
+                adversarial_accuracy=0.20,
+            ),
+            _attack_row(
+                attack="random_noise",
+                epsilon=0.1,
+                clean_accuracy=0.99,
+                adversarial_accuracy=0.55,
+            ),
+        ]
+    )
+
+    summary = transfer_summary(frame)
+    row = summary.iloc[0]
+
+    assert row["random_noise_accuracy"] == 0.55
+    assert np.isclose(row["accuracy_drop_vs_clean"], 0.79)
+    assert np.isclose(row["accuracy_drop_vs_noise"], 0.35)
+
+
+def test_transfer_summary_is_empty_without_a_noise_control() -> None:
+    frame = pd.DataFrame(
+        [_attack_row(attack="pgd", epsilon=0.1, clean_accuracy=0.9, adversarial_accuracy=0.2)]
+    )
+
+    assert transfer_summary(frame).empty
+
+
 def test_write_summary_writes_traceable_files(tmp_path: Path) -> None:
     results = tmp_path / "results"
     results.mkdir()
@@ -142,6 +207,17 @@ def test_write_summary_writes_traceable_files(tmp_path: Path) -> None:
             }
         ]
     ).to_csv(results / "baselines_metrics.csv", index=False)
+    pd.DataFrame(
+        [
+            _attack_row(attack="pgd", epsilon=0.05, clean_accuracy=0.9, adversarial_accuracy=0.3),
+            _attack_row(
+                attack="random_noise",
+                epsilon=0.05,
+                clean_accuracy=0.9,
+                adversarial_accuracy=0.6,
+            ),
+        ]
+    ).to_csv(results / "attack_metrics.csv", index=False)
     pd.DataFrame(
         [
             {

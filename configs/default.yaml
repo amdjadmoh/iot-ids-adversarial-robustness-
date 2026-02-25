@@ -76,6 +76,13 @@ attacks:
     # Maximum fraction of each feature's observed valid range that may change.
     max_feature_delta: 0.25
 
+  # Random-sign L-infinity noise control at the same budgets as FGSM/PGD.
+  # Transfer results are reported against this baseline so that "transfer"
+  # means more than "trees are fragile to any nudge at this epsilon".
+  random_noise:
+    epsilons: [0.005, 0.01, 0.02, 0.05, 0.1]
+    seed: 42
+
   # Model-agnostic search used directly against trees.
   black_box:
     queries: 500

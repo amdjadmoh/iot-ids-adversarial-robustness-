@@ -1,4 +1,10 @@
-"""White-box (unconstrained FGSM/PGD, feature-constrained) and transfer evasion."""
+"""White-box (FGSM/PGD), feature-constrained, noise-control, and transfer evasion.
+
+The random-noise attack is the control condition for the transfer experiments:
+it spends the same L-infinity budget as the gradient attacks without using any
+information about the model. Transfer is only meaningful to the extent that a
+gradient attack beats that control.
+"""
 
 from __future__ import annotations
 
@@ -32,7 +38,7 @@ from src.train import (
 
 LOGGER = logging.getLogger(__name__)
 
-ATTACK_NAMES = ("fgsm", "pgd", "constrained")
+ATTACK_NAMES = ("fgsm", "pgd", "constrained", "random_noise")
 
 
 def _replace_non_finite(frame: pd.DataFrame) -> pd.DataFrame:
@@ -104,6 +110,51 @@ def fgsm_attack(
             upper,
         )
         batches.append(adversarial.cpu().numpy())
+
+    if not batches:
+        return np.empty_like(features, dtype=np.float32)
+    return np.concatenate(batches, axis=0).astype(np.float32)
+
+
+def random_noise_attack(
+    features: np.ndarray,
+    epsilon: float,
+    clip_min: float | np.ndarray,
+    clip_max: float | np.ndarray,
+    seed: int,
+    batch_size: int = 4096,
+) -> np.ndarray:
+    """Return a random-sign perturbation of magnitude ``epsilon``.
+
+    This is the control condition for the transfer experiments: it moves every
+    feature by the same L-infinity budget as FGSM/PGD but carries no information
+    about the model, so any accuracy loss it causes is pure input fragility.
+    A transfer attack only demonstrates transferability for the part of the loss
+    that lies beyond this baseline.
+    """
+    if epsilon < 0:
+        raise ValueError("epsilon must be non-negative")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+
+    features_tensor = torch.as_tensor(features, dtype=torch.float32)
+    device = torch.device("cpu")
+    lower, upper = _as_bounds(clip_min, clip_max, device, torch.float32)
+    rng = np.random.default_rng(seed)
+
+    batches: list[np.ndarray] = []
+    for start in range(0, len(features_tensor), batch_size):
+        original = features_tensor[start : start + batch_size]
+        signs = rng.integers(0, 2, size=tuple(original.shape), dtype=np.int8) * 2 - 1
+        direction = torch.as_tensor(signs, dtype=torch.float32)
+        adversarial = _project(
+            original + epsilon * direction,
+            original,
+            epsilon,
+            lower,
+            upper,
+        )
+        batches.append(adversarial.numpy())
 
     if not batches:
         return np.empty_like(features, dtype=np.float32)
@@ -398,6 +449,20 @@ def _generate_attack(
             device=device,
         )
 
+    if attack_name == "random_noise":
+        params = config["attacks"]["random_noise"]
+        seed = int(params.get("seed", config["seed"]))
+        adv_scaled = random_noise_attack(
+            features_scaled,
+            epsilon=epsilon,
+            clip_min=lower_s,
+            clip_max=upper_s,
+            seed=seed,
+            batch_size=batch_size,
+        )
+        adv_raw = invert_and_clip(adv_scaled, preprocessor, lower_r, upper_r)
+        return adv_scaled, adv_raw
+
     raise ValueError(f"Unknown attack: {attack_name!r}")
 
 
@@ -625,6 +690,9 @@ def run(
         "pgd_random_start": bool(
             config["attacks"]["pgd"].get("random_start", True)
         ),
+        "random_noise_seed": int(
+            config["attacks"]["random_noise"].get("seed", config["seed"])
+        ),
         "bounds": "training_min_max",
         "device": str(device),
         "test_rows": int(len(test_frame)),
@@ -665,7 +733,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         nargs="+",
         choices=ATTACK_NAMES,
         default=None,
-        help="Attack families to run (default: fgsm, pgd, constrained).",
+        help="Attack families to run (default: every implemented attack).",
     )
     return parser.parse_args(argv)
 

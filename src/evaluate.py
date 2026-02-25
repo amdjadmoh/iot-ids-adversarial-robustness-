@@ -143,46 +143,127 @@ def worst_case_attack_summary(frame: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValueError(f"Attack metrics are missing columns: {missing}")
 
+    noise_rows = frame[frame["attack"] == "random_noise"]
+    noise_accuracy = {
+        (target, model, float(epsilon)): float(accuracy)
+        for target, model, epsilon, accuracy in zip(
+            noise_rows["target"],
+            noise_rows["model"],
+            noise_rows["epsilon"],
+            noise_rows["adversarial_accuracy"],
+        )
+    }
+    has_evasion = "evasion_rate" in frame.columns
+
     rows: list[dict[str, Any]] = []
     for (target, model, attack), group in frame.groupby(
         ["target", "model", "attack"]
     ):
         worst_accuracy_index = group["adversarial_accuracy"].idxmin()
-        rows.append(
-            {
-                "target": target,
-                "model": model,
-                "attack": attack,
-                "clean_accuracy": float(group["clean_accuracy"].iloc[0]),
-                "worst_accuracy": float(
-                    group["adversarial_accuracy"].min()
-                ),
-                "epsilon_at_worst_accuracy": float(
-                    group.loc[worst_accuracy_index, "epsilon"]
-                ),
-                "max_accuracy_drop": float(group["accuracy_drop"].max()),
-                "clean_macro_f1": float(group["clean_macro_f1"].iloc[0]),
-                "worst_macro_f1": float(
-                    group["adversarial_macro_f1"].min()
-                ),
-                "max_macro_f1_drop": float(group["macro_f1_drop"].max()),
-                "clean_macro_recall": float(
-                    group["clean_macro_recall"].iloc[0]
-                ),
-                "worst_macro_recall": float(
-                    group["adversarial_macro_recall"].min()
-                ),
-                "max_macro_recall_drop": float(
-                    group["macro_recall_drop"].max()
-                ),
-                "max_attack_success_rate": float(
-                    group["attack_success_rate"].max()
-                ),
-            }
-        )
+        worst_epsilon = float(group.loc[worst_accuracy_index, "epsilon"])
+        worst_accuracy = float(group["adversarial_accuracy"].min())
+        noise_at_worst = noise_accuracy.get((target, model, worst_epsilon))
+        row = {
+            "target": target,
+            "model": model,
+            "attack": attack,
+            "clean_accuracy": float(group["clean_accuracy"].iloc[0]),
+            "worst_accuracy": worst_accuracy,
+            "epsilon_at_worst_accuracy": worst_epsilon,
+            "max_accuracy_drop": float(group["accuracy_drop"].max()),
+            "clean_macro_f1": float(group["clean_macro_f1"].iloc[0]),
+            "worst_macro_f1": float(group["adversarial_macro_f1"].min()),
+            "max_macro_f1_drop": float(group["macro_f1_drop"].max()),
+            "clean_macro_recall": float(group["clean_macro_recall"].iloc[0]),
+            "worst_macro_recall": float(
+                group["adversarial_macro_recall"].min()
+            ),
+            "max_macro_recall_drop": float(group["macro_recall_drop"].max()),
+            "max_attack_success_rate": float(
+                group["attack_success_rate"].max()
+            ),
+        }
+        if attack != "random_noise" and noise_at_worst is not None:
+            row["random_noise_accuracy_at_worst_epsilon"] = noise_at_worst
+            row["transfer_effect_vs_noise"] = noise_at_worst - worst_accuracy
+        rows.append(row)
     return pd.DataFrame(rows).sort_values(
         ["target", "model", "attack"]
     ).reset_index(drop=True)
+
+
+def transfer_summary(frame: pd.DataFrame) -> pd.DataFrame:
+    """Compare each transferred attack against the random-noise control.
+
+    ``accuracy_drop_vs_noise`` is the part of the accuracy loss that is
+    attributable to the gradient direction rather than to plain input
+    fragility at the same L-infinity budget. It is the honest measure of
+    transferability.
+    """
+    required = {
+        "target",
+        "model",
+        "attack",
+        "epsilon",
+        "clean_accuracy",
+        "adversarial_accuracy",
+    }
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError(f"Attack metrics are missing columns: {missing}")
+
+    noise = (
+        frame[frame["attack"] == "random_noise"]
+        .set_index(["target", "model", "epsilon"])["adversarial_accuracy"]
+        .to_dict()
+    )
+    if not noise:
+        return pd.DataFrame(
+            columns=[
+                "target",
+                "model",
+                "attack",
+                "epsilon",
+                "clean_accuracy",
+                "random_noise_accuracy",
+                "adversarial_accuracy",
+                "accuracy_drop_vs_clean",
+                "accuracy_drop_vs_noise",
+            ]
+        )
+
+    rows: list[dict[str, Any]] = []
+    for record in frame[frame["attack"] != "random_noise"].to_dict("records"):
+        key = (
+            record["target"],
+            record["model"],
+            float(record["epsilon"]),
+        )
+        if key not in noise:
+            continue
+        noise_accuracy = float(noise[key])
+        rows.append(
+            {
+                "target": record["target"],
+                "model": record["model"],
+                "attack": record["attack"],
+                "epsilon": float(record["epsilon"]),
+                "clean_accuracy": float(record["clean_accuracy"]),
+                "random_noise_accuracy": noise_accuracy,
+                "adversarial_accuracy": float(record["adversarial_accuracy"]),
+                "accuracy_drop_vs_clean": float(record["clean_accuracy"])
+                - float(record["adversarial_accuracy"]),
+                "accuracy_drop_vs_noise": noise_accuracy
+                - float(record["adversarial_accuracy"]),
+            }
+        )
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["target", "model", "attack", "epsilon"])
+        .reset_index(drop=True)
+    )
+
+
 
 
 def write_summary(results_dir: Path) -> list[Path]:
@@ -202,12 +283,21 @@ def write_summary(results_dir: Path) -> list[Path]:
         LOGGER.warning("Missing baseline metrics: %s", baseline_path)
 
     attack_path = results_dir / "attack_metrics.csv"
+    attack_frame: pd.DataFrame | None = None
     if attack_path.exists():
-        attacks = worst_case_attack_summary(pd.read_csv(attack_path))
+        attack_frame = pd.read_csv(attack_path)
+        attacks = worst_case_attack_summary(attack_frame)
         output_path = results_dir / "attack_worst_case.csv"
         attacks.to_csv(output_path, index=False, float_format="%.6f")
         paths.append(output_path)
         summary["attack_worst_case"] = attacks.to_dict(orient="records")
+
+        transfer = transfer_summary(attack_frame)
+        if not transfer.empty:
+            transfer_path = results_dir / "transfer_summary.csv"
+            transfer.to_csv(transfer_path, index=False, float_format="%.6f")
+            paths.append(transfer_path)
+            summary["transfer_summary"] = transfer.to_dict(orient="records")
     else:
         LOGGER.warning("Missing attack metrics: %s", attack_path)
 

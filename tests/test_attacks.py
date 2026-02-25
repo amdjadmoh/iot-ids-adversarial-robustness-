@@ -9,6 +9,8 @@ from torch import nn
 
 from src.attacks import (
     attack_success_rate,
+    evasion_population,
+    evasion_rate,
     fgsm_attack,
     invert_and_clip,
     pgd_attack,
@@ -172,6 +174,45 @@ def test_attack_success_rate_ignores_clean_errors() -> None:
     adversarial = np.array([1, 0, 0])
 
     assert attack_success_rate(clean, adversarial, labels) == 1.0
+
+
+def test_evasion_rate_only_counts_detected_attacks_that_become_benign() -> None:
+    # 0 is the benign class. Row 0 is truly benign and is excluded. Row 1 was
+    # detected but stays an attack. Row 2 is relabelled as another attack class,
+    # which still triggers an alarm and therefore is not evasion. Row 3 is the
+    # only row that is actually silenced.
+    labels = np.array([0, 1, 2, 3, 1])
+    clean = np.array([0, 1, 1, 3, 1])
+    adversarial = np.array([0, 1, 2, 0, 1])
+
+    assert evasion_rate(labels, clean, adversarial, benign_index=0) == 0.25
+    assert evasion_population(labels, clean, benign_index=0) == 4
+
+
+def test_evasion_rate_ignores_attacks_the_model_already_missed() -> None:
+    labels = np.array([1, 1])
+    clean = np.array([0, 1])
+    adversarial = np.array([0, 1])
+
+    assert evasion_rate(labels, clean, adversarial, benign_index=0) == 0.0
+    assert evasion_population(labels, clean, benign_index=0) == 1
+
+
+def test_evasion_rate_is_zero_when_nothing_is_detected() -> None:
+    labels = np.array([1, 1])
+    clean = np.array([0, 0])
+    adversarial = np.array([0, 0])
+
+    assert evasion_rate(labels, clean, adversarial, benign_index=0) == 0.0
+
+
+def test_evasion_rate_full_evasion_and_no_evasion() -> None:
+    labels = np.array([1, 2, 3])
+    clean = np.array([1, 2, 3])
+    all_benign = np.zeros(3, dtype=np.int64)
+
+    assert evasion_rate(labels, clean, all_benign, benign_index=0) == 1.0
+    assert evasion_rate(labels, clean, clean, benign_index=0) == 0.0
 
 
 def test_scaled_feature_bounds_are_per_feature() -> None:

@@ -17,6 +17,8 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from src.attacks import (
     attack_success_rate,
+    evasion_population,
+    evasion_rate,
     fgsm_attack,
     invert_and_clip,
     pgd_attack,
@@ -24,7 +26,7 @@ from src.attacks import (
     scaled_feature_bounds,
 )
 from src.config import configure_logging, load_config, set_seed
-from src.evaluate import compute_metrics
+from src.evaluate import benign_class_index, compute_metrics
 from src.models import build_mlp, load_mlp, save_mlp
 from src.train import (
     MODEL_NAMES,
@@ -307,6 +309,7 @@ def _metric_row(
     adversarial_predictions: np.ndarray,
     baseline_clean_accuracy: float,
     num_classes: int,
+    benign_index: int,
 ) -> dict[str, Any]:
     clean_metrics = compute_metrics(
         labels,
@@ -339,6 +342,17 @@ def _metric_row(
             clean_predictions,
             adversarial_predictions,
             labels,
+        ),
+        "evasion_rate": evasion_rate(
+            labels,
+            clean_predictions,
+            adversarial_predictions,
+            benign_index,
+        ),
+        "evasion_population": evasion_population(
+            labels,
+            clean_predictions,
+            benign_index,
         ),
         "clean_accuracy_cost": float(baseline_clean_accuracy)
         - clean_metrics["accuracy"],
@@ -414,6 +428,7 @@ def run(
     for target in targets:
         labels, class_names = target_arrays(test_frame, target)
         num_classes = len(class_names)
+        benign_index = benign_class_index(target, class_names)
         baseline_mlp_path = models_dir / f"{target}_mlp.pt"
         if not baseline_mlp_path.exists():
             raise FileNotFoundError(
@@ -503,6 +518,7 @@ def run(
                         adversarial_predictions=clean_predictions,
                         baseline_clean_accuracy=baseline_clean_accuracy["mlp"],
                         num_classes=num_classes,
+                        benign_index=benign_index,
                     )
                 )
                 for attack_name in ATTACK_NAMES:
@@ -539,6 +555,7 @@ def run(
                                     "mlp"
                                 ],
                                 num_classes=num_classes,
+                                benign_index=benign_index,
                             )
                         )
 
@@ -606,6 +623,7 @@ def run(
                             adversarial_predictions=clean_predictions[name],
                             baseline_clean_accuracy=baseline_clean_accuracy[name],
                             num_classes=num_classes,
+                            benign_index=benign_index,
                         )
                     )
 
@@ -661,6 +679,7 @@ def run(
                                     name
                                 ],
                                 num_classes=num_classes,
+                                benign_index=benign_index,
                             )
                         )
 

@@ -4,9 +4,11 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.evaluate import (
     baseline_test_summary,
+    benign_class_index,
     compute_metrics,
     confusion_matrix_frame,
     per_class_recall_frame,
@@ -14,6 +16,23 @@ from src.evaluate import (
     worst_case_attack_summary,
     write_summary,
 )
+
+
+def test_benign_class_index_matches_each_target() -> None:
+    assert benign_class_index("multiclass", ("BenignTraffic", "DDoS-ICMP_Flood")) == 0
+    assert benign_class_index("family", ("Benign", "DDoS")) == 0
+    assert benign_class_index("binary", ("Benign", "Attack")) == 0
+    assert benign_class_index("family", ("DDoS", "Benign")) == 1
+
+
+def test_benign_class_index_rejects_unknown_target() -> None:
+    with pytest.raises(ValueError, match="Unknown target"):
+        benign_class_index("unknown", ("Benign",))
+
+
+def test_benign_class_index_requires_the_benign_class() -> None:
+    with pytest.raises(ValueError, match="benign class"):
+        benign_class_index("family", ("DDoS", "DoS"))
 
 
 def test_perfect_predictions_score_one() -> None:

@@ -16,6 +16,26 @@ from src.config import configure_logging, load_config
 
 LOGGER = logging.getLogger(__name__)
 
+# The benign class name differs per target granularity.
+BENIGN_CLASS_NAME = {
+    "multiclass": "BenignTraffic",
+    "family": "Benign",
+    "binary": "Benign",
+}
+
+
+def benign_class_index(target: str, class_names: Sequence[str]) -> int:
+    """Return the class index that means "benign traffic" for a target."""
+    if target not in BENIGN_CLASS_NAME:
+        raise ValueError(f"Unknown target: {target!r}")
+    name = BENIGN_CLASS_NAME[target]
+    names = list(class_names)
+    if name not in names:
+        raise ValueError(
+            f"Class names for {target!r} do not contain the benign class {name!r}"
+        )
+    return names.index(name)
+
 
 def compute_metrics(
     y_true: Sequence[int] | np.ndarray,
@@ -186,6 +206,11 @@ def worst_case_attack_summary(frame: pd.DataFrame) -> pd.DataFrame:
         if attack != "random_noise" and noise_at_worst is not None:
             row["random_noise_accuracy_at_worst_epsilon"] = noise_at_worst
             row["transfer_effect_vs_noise"] = noise_at_worst - worst_accuracy
+        if has_evasion:
+            row["max_evasion_rate"] = float(group["evasion_rate"].max())
+            row["evasion_rate_at_worst_accuracy"] = float(
+                group.loc[worst_accuracy_index, "evasion_rate"]
+            )
         rows.append(row)
     return pd.DataFrame(rows).sort_values(
         ["target", "model", "attack"]

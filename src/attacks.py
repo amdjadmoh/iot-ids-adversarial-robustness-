@@ -22,7 +22,7 @@ from torch import nn
 
 from src.config import configure_logging, load_config, set_seed
 from src.constraints import project_feature_constraints
-from src.evaluate import compute_metrics, per_class_recall_frame
+from src.evaluate import benign_class_index, compute_metrics, per_class_recall_frame
 from src.features import FEATURE_NAMES
 from src.models import load_mlp
 from src.train import (
@@ -341,6 +341,50 @@ def attack_success_rate(
     return float((adversarial_predictions[correct] != labels[correct]).mean())
 
 
+def detected_attack_mask(
+    labels: np.ndarray,
+    clean_predictions: np.ndarray,
+    benign_index: int,
+) -> np.ndarray:
+    """Return the rows that are true attacks and were detected as attacks."""
+    labels = np.asarray(labels)
+    clean_predictions = np.asarray(clean_predictions)
+    return (labels != benign_index) & (clean_predictions != benign_index)
+
+
+def evasion_rate(
+    labels: np.ndarray,
+    clean_predictions: np.ndarray,
+    adversarial_predictions: np.ndarray,
+    benign_index: int,
+) -> float:
+    """Fraction of detected attacks that are relabelled benign after the attack.
+
+    Only rows whose true label is an attack *and* that the model already flagged
+    as an attack count towards the denominator. Reclassifying a detected attack
+    as a different attack class keeps the alarm firing, so it is not evasion;
+    this metric is the one that answers "does the detector stay silent?".
+    """
+    labels = np.asarray(labels)
+    clean_predictions = np.asarray(clean_predictions)
+    adversarial_predictions = np.asarray(adversarial_predictions)
+    mask = detected_attack_mask(labels, clean_predictions, benign_index)
+    if not mask.any():
+        return 0.0
+    return float((adversarial_predictions[mask] == benign_index).mean())
+
+
+def evasion_population(
+    labels: np.ndarray,
+    clean_predictions: np.ndarray,
+    benign_index: int,
+) -> int:
+    """Return the number of rows the evasion rate is computed over."""
+    return int(
+        detected_attack_mask(labels, clean_predictions, benign_index).sum()
+    )
+
+
 def scaled_feature_bounds(features: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Return the per-feature minimum and maximum of the training input space."""
     if features.ndim != 2:
@@ -536,6 +580,7 @@ def run(
     for target in targets:
         labels, class_names = target_arrays(test_frame, target)
         num_classes = len(class_names)
+        benign_index_value = benign_class_index(target, class_names)
         mlp_path = models_dir / f"{target}_mlp.pt"
         if not mlp_path.exists():
             raise FileNotFoundError(
@@ -634,6 +679,17 @@ def run(
                                 clean_predictions[name],
                                 adversarial_predictions[name],
                                 labels,
+                            ),
+                            "evasion_rate": evasion_rate(
+                                labels,
+                                clean_predictions[name],
+                                adversarial_predictions[name],
+                                benign_index_value,
+                            ),
+                            "evasion_population": evasion_population(
+                                labels,
+                                clean_predictions[name],
+                                benign_index_value,
                             ),
                         }
                     )

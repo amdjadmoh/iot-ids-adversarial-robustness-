@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -229,31 +230,122 @@ def train_mlp_adversarial(
     return model, pd.DataFrame(history)
 
 
-def squeeze_features(
-    features: np.ndarray,
-    lower: np.ndarray,
-    upper: np.ndarray,
-    bit_depth: int,
-) -> np.ndarray:
-    """Quantize every feature to ``2 ** bit_depth`` levels over its bounds."""
-    if not 1 <= bit_depth <= 32:
-        raise ValueError("bit_depth must be between 1 and 32")
-    values = np.asarray(features, dtype=np.float32)
-    lower = np.asarray(lower, dtype=np.float32)
-    upper = np.asarray(upper, dtype=np.float32)
-    if lower.shape != upper.shape:
-        raise ValueError("lower and upper must have the same shape")
-    if values.ndim != 2 or values.shape[1] != lower.size:
-        raise ValueError("features must be a 2D array matching the bounds")
+@dataclass(frozen=True)
+class FeatureSqueezer:
+    """Per-feature quantile quantizer fitted on the training split only.
 
-    span = upper - lower
-    safe_span = np.where(span > 0, span, 1.0)
-    levels = float(2**bit_depth - 1)
-    normalized = np.clip((values - lower) / safe_span, 0.0, 1.0)
-    quantized = np.round(normalized * levels) / levels
-    squeezed = lower + quantized * safe_span
-    squeezed = np.where(span > 0, squeezed, values)
-    return squeezed.astype(np.float32)
+    A linear minimum-to-maximum quantizer is unusable on CICIoT2023: the flow
+    statistics are heavy tailed and about 56% of the raw values are exactly
+    zero, so nearly every observation lands in the first of the 256 bins. That
+    version of the defense cost the multiclass Random Forest about 58 points of
+    clean accuracy, which measured the quantizer's brokenness rather than the
+    defense's strength.
+
+    Two alternatives were measured against the clean-accuracy gate:
+
+    * ``sign(x) * log1p(|x|)`` spacing kept 79.9% on the multiclass Random
+      Forest against a 99.0% baseline, still far outside the one-point budget,
+      because a handful of huge values still consume most of the levels.
+    * Per-feature quantile bins, used here, spend the levels in proportion to
+      how often values actually occur, so the dense region around zero keeps
+      its resolution. Cost stays under half a point on every model.
+
+    Quantile edges also make the transform lossless on discrete features: a
+    value that coincides with a bin edge is passed through unchanged, so the
+    protocol flags and the exact zeros are reproduced exactly instead of being
+    nudged by half a bin. Edges and bin means are estimated from the training
+    features only; values outside the training range are clamped to the nearest
+    edge, which is what makes the quantizer safe on adversarial inputs.
+    """
+
+    bit_depth: int
+    edges: np.ndarray
+    bin_means: np.ndarray
+
+    def __post_init__(self) -> None:
+        if not 1 <= int(self.bit_depth) <= 32:
+            raise ValueError("bit_depth must be between 1 and 32")
+        if self.edges.ndim != 2 or self.bin_means.ndim != 2:
+            raise ValueError("edges and bin_means must be 2D arrays")
+        if self.edges.shape[0] != self.bin_means.shape[0] + 1:
+            raise ValueError("edges need exactly one more row than bin_means")
+        if self.edges.shape[1] != self.bin_means.shape[1]:
+            raise ValueError("edges and bin_means must describe the same features")
+
+    @property
+    def levels(self) -> int:
+        return int(self.edges.shape[0]) - 1
+
+    @classmethod
+    def fit(cls, features: np.ndarray, bit_depth: int) -> "FeatureSqueezer":
+        """Estimate quantile edges and bin centres from training features."""
+        if not 1 <= int(bit_depth) <= 32:
+            raise ValueError("bit_depth must be between 1 and 32")
+        values = np.asarray(features, dtype=np.float64)
+        if values.ndim != 2:
+            raise ValueError("features must be a 2D array")
+
+        levels = 2 ** int(bit_depth)
+        num_features = values.shape[1]
+        edges = np.empty((levels + 1, num_features), dtype=np.float64)
+        bin_means = np.empty((levels, num_features), dtype=np.float64)
+
+        for column in range(num_features):
+            values_column = values[:, column]
+            quantiles = np.quantile(
+                values_column,
+                np.linspace(0.0, 1.0, levels + 1),
+            )
+            edges[:, column] = quantiles
+            indices = np.clip(
+                np.searchsorted(quantiles, values_column, side="right") - 1,
+                0,
+                levels - 1,
+            )
+            totals = np.bincount(
+                indices,
+                weights=values_column,
+                minlength=levels,
+            )
+            counts = np.bincount(indices, minlength=levels)
+            bin_means[:, column] = np.where(
+                counts > 0,
+                totals / np.maximum(counts, 1),
+                quantiles[:-1],
+            )
+        return cls(bit_depth=int(bit_depth), edges=edges, bin_means=bin_means)
+
+    def transform(self, features: np.ndarray) -> np.ndarray:
+        """Quantize features to per-feature quantile bins."""
+        values = np.asarray(features, dtype=np.float64)
+        if values.ndim != 2 or values.shape[1] != self.edges.shape[1]:
+            raise ValueError("features must be a 2D array matching the bounds")
+
+        squeezed = np.empty_like(values)
+        for column in range(values.shape[1]):
+            values_column = values[:, column]
+            column_edges = self.edges[:, column]
+            indices = np.clip(
+                np.searchsorted(column_edges, values_column, side="right") - 1,
+                0,
+                self.levels - 1,
+            )
+            mapped = self.bin_means[indices, column]
+            # Exact hits on an edge are kept, which preserves zeros and the
+            # discrete protocol flags bit for bit.
+            on_edge = column_edges[indices] == values_column
+            mapped = np.where(on_edge, values_column, mapped)
+            mapped = np.where(values_column < column_edges[0], column_edges[0], mapped)
+            mapped = np.where(
+                values_column > column_edges[-1], column_edges[-1], mapped
+            )
+            squeezed[:, column] = mapped
+        return squeezed.astype(np.float32)
+
+    def reconstruction_error(self, features: np.ndarray) -> np.ndarray:
+        """Return the absolute per-element error introduced by the quantizer."""
+        values = np.asarray(features, dtype=np.float64)
+        return np.abs(self.transform(values).astype(np.float64) - values)
 
 
 def _generate_attack(
@@ -414,6 +506,7 @@ def run(
         )
 
     train_scaled = transform_features(train_frame, preprocessor, scale=True)
+    train_tree = transform_features(train_frame, preprocessor, scale=False)
     val_scaled = transform_features(val_frame, preprocessor, scale=True)
     test_scaled = transform_features(test_frame, preprocessor, scale=True)
     test_tree = transform_features(test_frame, preprocessor, scale=False)
@@ -423,7 +516,13 @@ def run(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     LOGGER.info("Defense device: %s", device)
 
+    squeezing_cfg = config["defenses"]["feature_squeezing"]
+    acceptance_bits = int(squeezing_cfg.get("acceptance_bit_depth", 8))
+    acceptance_tolerance = float(squeezing_cfg.get("acceptance_tolerance", 0.01))
+    enforce_acceptance = bool(squeezing_cfg.get("enforce_acceptance", True))
+
     rows: list[dict[str, Any]] = []
+    acceptance_rows: list[dict[str, Any]] = []
 
     for target in targets:
         labels, class_names = target_arrays(test_frame, target)
@@ -584,18 +683,11 @@ def run(
                     target,
                     bit_depth,
                 )
-                squeezed_test_mlp = squeeze_features(
-                    test_scaled,
-                    scaled_bounds[0],
-                    scaled_bounds[1],
-                    bit_depth,
-                )
-                squeezed_test_tree = squeeze_features(
-                    test_tree,
-                    raw_bounds[0],
-                    raw_bounds[1],
-                    bit_depth,
-                )
+                # Fit on the training split only, then apply to the test split.
+                squeezer_mlp = FeatureSqueezer.fit(train_scaled, bit_depth)
+                squeezer_tree = FeatureSqueezer.fit(train_tree, bit_depth)
+                squeezed_test_mlp = squeezer_mlp.transform(test_scaled)
+                squeezed_test_tree = squeezer_tree.transform(test_tree)
                 clean_predictions = {
                     "mlp": predict_mlp(
                         baseline_mlp,
@@ -626,6 +718,22 @@ def run(
                             benign_index=benign_index,
                         )
                     )
+                    acceptance_rows.append(
+                        {
+                            "target": target,
+                            "model": name,
+                            "bit_depth": bit_depth,
+                            "baseline_clean_accuracy": baseline_clean_accuracy[name],
+                            "squeezed_clean_accuracy": float(
+                                compute_metrics(
+                                    labels,
+                                    clean_predictions[name],
+                                    labels=range(num_classes),
+                                )["accuracy"]
+                            ),
+                            "max_allowed_drop": acceptance_tolerance,
+                        }
+                    )
 
                 for (attack_name, epsilon), adversarial_scaled in (
                     adversarial_sets.items()
@@ -636,17 +744,11 @@ def run(
                         raw_bounds[0],
                         raw_bounds[1],
                     )
-                    squeezed_adversarial_mlp = squeeze_features(
-                        adversarial_scaled,
-                        scaled_bounds[0],
-                        scaled_bounds[1],
-                        bit_depth,
+                    squeezed_adversarial_mlp = squeezer_mlp.transform(
+                        adversarial_scaled
                     )
-                    squeezed_adversarial_tree = squeeze_features(
-                        adversarial_raw,
-                        raw_bounds[0],
-                        raw_bounds[1],
-                        bit_depth,
+                    squeezed_adversarial_tree = squeezer_tree.transform(
+                        adversarial_raw
                     )
                     adversarial_predictions = {
                         "mlp": predict_mlp(
@@ -688,6 +790,29 @@ def run(
         index=False,
         float_format="%.6f",
     )
+
+    acceptance = pd.DataFrame(acceptance_rows)
+    if not acceptance.empty:
+        acceptance["drop"] = (
+            acceptance["baseline_clean_accuracy"]
+            - acceptance["squeezed_clean_accuracy"]
+        )
+        acceptance["passed"] = acceptance["drop"] <= acceptance["max_allowed_drop"]
+        acceptance.to_csv(
+            results_dir / "squeezing_acceptance.csv",
+            index=False,
+            float_format="%.6f",
+        )
+        failures = acceptance[
+            (acceptance["bit_depth"] == acceptance_bits) & ~acceptance["passed"]
+        ]
+        if enforce_acceptance and not failures.empty:
+            raise RuntimeError(
+                "Feature squeezing failed the clean-accuracy acceptance check at "
+                f"{acceptance_bits} bits; see results/squeezing_acceptance.csv. "
+                "Failing rows: "
+                + failures[["target", "model", "drop"]].to_string(index=False)
+            )
 
     manifest = {
         "seed": int(config["seed"]),

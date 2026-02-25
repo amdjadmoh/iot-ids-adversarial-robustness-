@@ -96,6 +96,12 @@ defenses:
 
   feature_squeezing:
     bit_depths: [8, 6, 4]
+    # Acceptance gate: at this bit depth the quantizer may not cost more than
+    # `acceptance_tolerance` clean accuracy for any model. A failing run aborts
+    # instead of quietly reporting a broken defense.
+    acceptance_bit_depth: 8
+    acceptance_tolerance: 0.01
+    enforce_acceptance: true
 
 evaluation:
   targets: [multiclass, family, binary]

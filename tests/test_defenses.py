@@ -6,62 +6,96 @@ import numpy as np
 import pytest
 import torch
 
-from src.defenses import squeeze_features, train_mlp_adversarial
+from src.defenses import FeatureSqueezer, train_mlp_adversarial
 from src.train import predict_mlp
 
 
-def test_squeeze_features_quantizes_to_configured_levels() -> None:
+def test_feature_squeezer_quantizes_to_configured_levels() -> None:
     values = np.array([[0.0, 0.5], [0.1, 0.9]], dtype=np.float32)
+    squeezer = FeatureSqueezer.fit(values, bit_depth=2)
 
-    squeezed = squeeze_features(
-        values,
-        lower=np.zeros(2, dtype=np.float32),
-        upper=np.ones(2, dtype=np.float32),
-        bit_depth=2,
-    )
+    squeezed = squeezer.transform(values)
 
-    allowed = np.array([0.0, 1 / 3, 2 / 3, 1.0])
-    for value in squeezed.ravel():
-        assert any(np.isclose(value, level, atol=1e-6) for level in allowed)
-    assert squeezed.min() >= 0.0
-    assert squeezed.max() <= 1.0
+    assert squeezed.shape == values.shape
+    assert np.unique(squeezed[:, 0]).size <= 4
+    assert squeezer.levels == 4
 
 
-def test_squeeze_features_clips_out_of_range_values() -> None:
-    values = np.array([[-1.0, 2.0]], dtype=np.float32)
+def test_feature_squeezer_is_deterministic() -> None:
+    rng = np.random.default_rng(0)
+    train = rng.exponential(size=(200, 4)).astype(np.float32)
+    test = rng.exponential(size=(50, 4)).astype(np.float32)
+    squeezer = FeatureSqueezer.fit(train, bit_depth=8)
 
-    squeezed = squeeze_features(
-        values,
-        lower=np.zeros(2, dtype=np.float32),
-        upper=np.ones(2, dtype=np.float32),
-        bit_depth=2,
-    )
+    first = squeezer.transform(test)
+    second = squeezer.transform(test)
 
-    assert squeezed.tolist() == [[0.0, 1.0]]
-
-
-def test_squeeze_features_leaves_constant_features_unchanged() -> None:
-    values = np.array([[7.0]], dtype=np.float32)
-
-    squeezed = squeeze_features(
-        values,
-        lower=np.array([7.0], dtype=np.float32),
-        upper=np.array([7.0], dtype=np.float32),
-        bit_depth=4,
-    )
-
-    assert squeezed[0, 0] == 7.0
+    assert np.array_equal(first, second)
 
 
-@pytest.mark.parametrize("bit_depth", [0, 33])
-def test_squeeze_features_rejects_invalid_bit_depth(bit_depth: int) -> None:
+def test_feature_squeezer_is_fitted_on_train_only() -> None:
+    train = np.array([[0.0], [1.0], [2.0]], dtype=np.float32)
+    test = np.array([[1000.0]], dtype=np.float32)
+
+    squeezer = FeatureSqueezer.fit(train, bit_depth=8)
+
+    assert squeezer.edges[0, 0] == 0.0
+    assert squeezer.edges[-1, 0] == 2.0
+    # Test values outside the training range are clamped to the train edges,
+    # which proves the fitted object never consulted the test split.
+    assert squeezer.transform(test)[0, 0] == np.float32(2.0)
+
+
+def test_feature_squeezer_preserves_zeros_and_discrete_values_exactly() -> None:
+    train = np.concatenate(
+        [np.zeros(900, dtype=np.float32), np.ones(100, dtype=np.float32)]
+    ).reshape(-1, 1)
+    squeezer = FeatureSqueezer.fit(train, bit_depth=8)
+
+    probed = np.array([[0.0], [1.0]], dtype=np.float32)
+
+    assert squeezer.transform(probed).ravel().tolist() == [0.0, 1.0]
+
+
+def test_feature_squeezer_eight_bit_error_is_small_on_train() -> None:
+    rng = np.random.default_rng(3)
+    train = rng.lognormal(size=(500, 5)).astype(np.float32)
+    squeezer = FeatureSqueezer.fit(train, bit_depth=8)
+
+    error = squeezer.reconstruction_error(train)
+
+    # Equal-mass bins keep the reconstruction error within one bin width, so
+    # the error must stay small relative to each feature's observed spread.
+    spread = np.quantile(train, 0.95, axis=0) - np.quantile(train, 0.05, axis=0)
+    assert np.all(np.median(error, axis=0) < 0.1 * spread)
+
+    # 8 bits must still resolve the training distribution, not collapse it.
+    for column in range(train.shape[1]):
+        assert np.unique(squeezer.transform(train)[:, column]).size >= 50
+
+
+def test_feature_squeezer_handles_negative_values() -> None:
+    train = np.array([[-5.0], [0.0], [5.0]], dtype=np.float32)
+    squeezer = FeatureSqueezer.fit(train, bit_depth=8)
+
+    squeezed = squeezer.transform(train)
+
+    assert squeezed[0, 0] < 0.0 < squeezed[2, 0]
+    assert np.isclose(squeezed[0, 0], -5.0, rtol=0.02)
+    assert np.isclose(squeezed[2, 0], 5.0, rtol=0.02)
+    assert abs(float(squeezed[1, 0])) < 0.05
+
+
+def test_feature_squeezer_rejects_invalid_bit_depth() -> None:
     with pytest.raises(ValueError, match="bit_depth"):
-        squeeze_features(
-            np.zeros((1, 2), dtype=np.float32),
-            lower=np.zeros(2, dtype=np.float32),
-            upper=np.ones(2, dtype=np.float32),
-            bit_depth=bit_depth,
-        )
+        FeatureSqueezer.fit(np.zeros((2, 2)), bit_depth=0)
+
+
+def test_feature_squeezer_rejects_mismatched_width() -> None:
+    squeezer = FeatureSqueezer.fit(np.zeros((2, 2)), bit_depth=4)
+
+    with pytest.raises(ValueError, match="matching the bounds"):
+        squeezer.transform(np.zeros((2, 3)))
 
 
 def test_adversarial_training_smoke() -> None:

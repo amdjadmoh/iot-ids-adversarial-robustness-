@@ -553,6 +553,57 @@ def split_dataset(
     return result
 
 
+CLASS_TARGETS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "multiclass": ("label_multiclass", MULTICLASS_LABELS),
+    "family": ("label_family", FAMILY_NAMES),
+    "binary": ("label_binary", ("Benign", "Attack")),
+}
+SPLIT_NAMES: tuple[str, ...] = ("train", "val", "test")
+
+
+def _target_names(frame: pd.DataFrame, target: str) -> pd.Series:
+    """Return the class name of every row for one target granularity."""
+    if target == "multiclass":
+        return frame["label_multiclass"]
+    if target == "family":
+        return frame["label_family"]
+    if target == "binary":
+        return frame["label_binary"].map({0: "Benign", 1: "Attack"})
+    raise ValueError(f"Unknown target: {target!r}")
+
+
+def class_count_frame(
+    frame: pd.DataFrame,
+    min_test_samples: int,
+) -> pd.DataFrame:
+    """Return per-class train/validation/test counts for every target.
+
+    Several CICIoT2023 classes have only a handful of test rows (CommandInjection
+    has three), so their recall and the macro average built from it are noisy.
+    Writing the counts next to the metrics keeps that visible instead of letting
+    a macro-F1 hide it.
+    """
+    if min_test_samples < 0:
+        raise ValueError("rare_class_min_test_samples must be non-negative")
+
+    rows: list[dict[str, Any]] = []
+    for target, (_, class_names) in CLASS_TARGETS.items():
+        counts = {
+            split: _target_names(
+                frame[frame["split"] == split],
+                target,
+            ).value_counts()
+            for split in SPLIT_NAMES
+        }
+        for class_name in class_names:
+            row: dict[str, Any] = {"target": target, "class_name": class_name}
+            for split in SPLIT_NAMES:
+                row[split] = int(counts[split].get(class_name, 0))
+            row["low_test_support"] = row["test"] < min_test_samples
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def save_outputs(frame: pd.DataFrame, config: dict[str, Any]) -> None:
     """Persist split data under data/ and generated summaries under results/."""
     processed_dir = Path(config["data"].get("processed_dir", "data/processed"))
@@ -588,6 +639,14 @@ def save_outputs(frame: pd.DataFrame, config: dict[str, Any]) -> None:
         .reset_index()
     )
     file_summary.to_csv(results_dir / "split_files.csv", index=False)
+
+    class_counts = class_count_frame(
+        frame,
+        min_test_samples=int(
+            config.get("data", {}).get("rare_class_min_test_samples", 30)
+        ),
+    )
+    class_counts.to_csv(results_dir / "test_class_counts.csv", index=False)
 
     summary = {
         "seed": int(config["seed"]),

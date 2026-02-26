@@ -16,6 +16,9 @@ data:
   # Per-file CSV read size, keeping memory bounded on the full dataset.
   read_chunksize: 250000
   drop_columns: []
+  # Classes with fewer test rows than this are flagged as low-support in
+  # results/test_class_counts.csv and marked as unreliable in per-class figures.
+  rare_class_min_test_samples: 30
 
 labels:
   multiclass: 34        # 33 attack types + Benign

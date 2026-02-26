@@ -12,6 +12,7 @@ from src.data import (
     BENIGN_LABEL,
     FAMILY_BY_LABEL,
     LABEL_TO_INDEX,
+    class_count_frame,
     load_ciciot2023,
     save_outputs,
     split_dataset,
@@ -134,6 +135,65 @@ def test_row_split_when_capture_holdout_disabled(config: dict[str, Any]) -> None
     assert set(frame["split"]) == {"train", "val", "test"}
 
 
+def test_class_count_frame_reports_every_target_and_flags_rare_classes() -> None:
+    labels = [
+        BENIGN_LABEL,
+        "XSS",
+        "XSS",
+        "DDoS-ICMP_Flood",
+        BENIGN_LABEL,
+        "XSS",
+        BENIGN_LABEL,
+        BENIGN_LABEL,
+        BENIGN_LABEL,
+        "DDoS-ICMP_Flood",
+    ]
+    frame = pd.DataFrame(
+        {
+            "split": ["train"] * 4 + ["val"] * 2 + ["test"] * 4,
+            "label_multiclass": labels,
+            "label_family": [FAMILY_BY_LABEL[label] for label in labels],
+            "label_binary": [
+                0 if label == BENIGN_LABEL else 1 for label in labels
+            ],
+        }
+    )
+
+    counts = class_count_frame(frame, min_test_samples=3)
+
+    assert set(counts["target"]) == {"multiclass", "family", "binary"}
+    rows = counts[counts["target"] == "multiclass"].set_index("class_name")
+    assert rows.loc[BENIGN_LABEL, "train"] == 1
+    assert rows.loc[BENIGN_LABEL, "val"] == 1
+    assert rows.loc[BENIGN_LABEL, "test"] == 3
+    assert bool(rows.loc[BENIGN_LABEL, "low_test_support"]) is False
+    assert rows.loc["XSS", "train"] == 2
+    assert bool(rows.loc["XSS", "low_test_support"]) is True
+    assert bool(rows.loc["DDoS-ICMP_Flood", "low_test_support"]) is True
+
+    binary = counts[counts["target"] == "binary"].set_index("class_name")
+    assert binary.loc["Attack", "test"] == 1
+    assert binary.loc["Benign", "test"] == 3
+
+    family = counts[counts["target"] == "family"].set_index("class_name")
+    assert family.loc["Web", "train"] == 2
+    assert family.loc["DDoS", "test"] == 1
+
+    assert set(counts.columns) == {
+        "target",
+        "class_name",
+        "train",
+        "val",
+        "test",
+        "low_test_support",
+    }
+
+
+def test_class_count_frame_rejects_negative_threshold() -> None:
+    with pytest.raises(ValueError, match="non-negative"):
+        class_count_frame(pd.DataFrame(), min_test_samples=-1)
+
+
 def test_save_outputs_writes_generated_files(
     config: dict[str, Any],
     tmp_path: Path,
@@ -162,6 +222,17 @@ def test_save_outputs_writes_generated_files(
     assert summary["sampled_rows"] == len(frame)
     assert set(summary["splits"]) == {"train", "val", "test"}
     assert (results / "split_files.csv").exists()
+
+    class_counts = pd.read_csv(results / "test_class_counts.csv")
+    assert set(class_counts.columns) == {
+        "target",
+        "class_name",
+        "train",
+        "val",
+        "test",
+        "low_test_support",
+    }
+    assert set(class_counts["target"]) == {"multiclass", "family", "binary"}
 
 
 def test_unknown_label_is_rejected(

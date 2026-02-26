@@ -548,6 +548,9 @@ def run(
     train_frame = splits["train"]
     test_frame = splits["test"]
     features = resolve_features(train_frame)
+    rare_class_min_test_samples = int(
+        config.get("data", {}).get("rare_class_min_test_samples", 30)
+    )
 
     models_dir = Path(config["data"].get("models_dir", "data/models"))
     results_dir = Path(config["paths"].get("results", "results"))
@@ -708,6 +711,9 @@ def run(
                     recall_frame["recall_drop"] = (
                         recall_frame["clean_recall"]
                         - recall_frame["adversarial_recall"]
+                    )
+                    recall_frame["low_test_support"] = (
+                        recall_frame["support"] < rare_class_min_test_samples
                     )
                     recall_frame.insert(0, "epsilon", float(epsilon))
                     recall_frame.insert(0, "attack", attack_name)

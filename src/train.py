@@ -387,6 +387,9 @@ def run(
 
     metrics_rows: list[dict[str, Any]] = []
     recall_frames: list[pd.DataFrame] = []
+    rare_class_min_test_samples = int(
+        config.get("data", {}).get("rare_class_min_test_samples", 30)
+    )
 
     for target in targets:
         labels_by_split = {
@@ -400,6 +403,11 @@ def run(
             num_classes,
             target,
         )
+        test_support = np.bincount(
+            labels_by_split["test"],
+            minlength=num_classes,
+        )
+        low_test_support = test_support < rare_class_min_test_samples
 
         for model_name in model_names:
             LOGGER.info("Training %s for target %s", model_name, target)
@@ -475,6 +483,7 @@ def run(
                     predictions,
                     class_names,
                 )
+                recall_frame["low_test_support"] = low_test_support
                 recall_frame.insert(0, "split", split_name)
                 recall_frame.insert(0, "model", model_name)
                 recall_frame.insert(0, "target", target)

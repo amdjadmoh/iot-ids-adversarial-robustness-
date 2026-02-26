@@ -71,6 +71,24 @@ def _write_resources(results: Path) -> None:
     )
     pd.DataFrame(attack_rows).to_csv(results / "attack_metrics.csv", index=False)
 
+    count_rows = []
+    for target in targets:
+        for class_name, test_count in (("a", 4), ("b", 120), ("c", 90)):
+            count_rows.append(
+                {
+                    "target": target,
+                    "class_name": class_name,
+                    "train": 300,
+                    "val": 40,
+                    "test": test_count,
+                    "low_test_support": test_count < 30,
+                }
+            )
+    pd.DataFrame(count_rows).to_csv(
+        results / "test_class_counts.csv",
+        index=False,
+    )
+
     defense_rows = []
     for target in targets:
         for defense, parameter, clean_accuracy, adversarial_accuracy in (
@@ -129,6 +147,26 @@ def test_generate_all_writes_every_supported_figure(tmp_path: Path) -> None:
     assert len(paths) == 2 + 3 + 2 + 6 + 3
     assert all(path.exists() for path in paths)
     assert all(path.stat().st_size > 0 for path in paths)
+
+
+def test_low_support_classes_are_marked_in_per_class_figures(
+    tmp_path: Path,
+) -> None:
+    results = tmp_path / "results"
+    figures = tmp_path / "figures"
+    results.mkdir()
+    _write_resources(results)
+
+    generate_all(results, figures, min_test_samples=30)
+
+    # The figure is regenerated with a footnote when any class is flagged; the
+    # helper is the single source of truth for which classes those are.
+    from src.plots import _low_support_classes
+
+    for target in ("multiclass", "family", "binary"):
+        assert _low_support_classes(results, target, 30) == {"a"}
+        assert _low_support_classes(results, target, 5) == {"a"}
+        assert _low_support_classes(results, target, 2) == set()
 
 
 def test_generate_all_skips_missing_inputs(tmp_path: Path) -> None:

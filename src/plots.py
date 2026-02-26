@@ -71,7 +71,27 @@ def plot_baseline_metrics(results_dir: Path, figures_dir: Path) -> list[Path]:
     return paths
 
 
-def plot_per_class_recall(results_dir: Path, figures_dir: Path) -> list[Path]:
+def _low_support_classes(
+    results_dir: Path,
+    target: str,
+    min_test_samples: int,
+) -> set[str]:
+    """Return the classes flagged as having too few test rows to trust."""
+    path = results_dir / "test_class_counts.csv"
+    if not path.exists():
+        return set()
+    frame = pd.read_csv(path)
+    subset = frame[
+        (frame["target"] == target) & (frame["test"] < min_test_samples)
+    ]
+    return set(subset["class_name"])
+
+
+def plot_per_class_recall(
+    results_dir: Path,
+    figures_dir: Path,
+    min_test_samples: int = 30,
+) -> list[Path]:
     path = results_dir / "baselines_per_class_recall.csv"
     if not path.exists():
         LOGGER.warning("Skipping per-class recall; %s is missing", path)
@@ -87,6 +107,11 @@ def plot_per_class_recall(results_dir: Path, figures_dir: Path) -> list[Path]:
         class_names = (
             subset[subset["model"] == models[0]]["class_name"].tolist()
         )
+        low_support = _low_support_classes(
+            results_dir,
+            target,
+            min_test_samples,
+        )
         width = max(10.0, 0.45 * len(class_names) + 3.0)
         figure, axis = plt.subplots(figsize=(width, 5))
         positions = np.arange(len(class_names))
@@ -98,18 +123,33 @@ def plot_per_class_recall(results_dir: Path, figures_dir: Path) -> list[Path]:
                 .reindex(class_names)["recall"]
             )
             offset = (index - (len(models) - 1) / 2) * bar_width
-            axis.bar(
+            bars = axis.bar(
                 positions + offset,
                 values.to_numpy(),
                 width=bar_width,
                 label=model,
             )
+            for bar, class_name in zip(bars, class_names):
+                if class_name in low_support:
+                    bar.set_hatch("///")
+                    bar.set_edgecolor("black")
+                    bar.set_linewidth(0.4)
         axis.set_xticks(positions)
-        axis.set_xticklabels(class_names, rotation=90, fontsize=7)
+        axis.set_xticklabels(
+            [
+                f"{name}*" if name in low_support else name
+                for name in class_names
+            ],
+            rotation=90,
+            fontsize=7,
+        )
         axis.set_ylabel("Recall")
         axis.set_xlabel("Class")
         axis.set_ylim(0.0, 1.05)
-        axis.set_title(f"Per-class test recall ({target})")
+        title = f"Per-class test recall ({target})"
+        if low_support:
+            title += f"\n* fewer than {min_test_samples} test samples (hatched)"
+        axis.set_title(title)
         axis.legend(title="Model", fontsize=8)
         paths.append(
             _save(figure, figures_dir / f"per_class_recall_{target}.png")
@@ -267,12 +307,18 @@ def plot_defense_tradeoff(results_dir: Path, figures_dir: Path) -> list[Path]:
     return paths
 
 
-def generate_all(results_dir: Path, figures_dir: Path) -> list[Path]:
+def generate_all(
+    results_dir: Path,
+    figures_dir: Path,
+    min_test_samples: int = 30,
+) -> list[Path]:
     """Generate every figure supported by the result files that exist."""
     figures_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
     paths.extend(plot_baseline_metrics(results_dir, figures_dir))
-    paths.extend(plot_per_class_recall(results_dir, figures_dir))
+    paths.extend(
+        plot_per_class_recall(results_dir, figures_dir, min_test_samples)
+    )
     paths.extend(plot_confusion_matrices(results_dir, figures_dir))
     paths.extend(plot_attack_curves(results_dir, figures_dir))
     paths.extend(plot_defense_tradeoff(results_dir, figures_dir))
@@ -296,7 +342,13 @@ def main(argv: list[str] | None = None) -> None:
     config = load_config(args.config)
     results_dir = Path(config["paths"].get("results", "results"))
     figures_dir = Path(config["paths"].get("figures", "figures"))
-    paths = generate_all(results_dir, figures_dir)
+    paths = generate_all(
+        results_dir,
+        figures_dir,
+        min_test_samples=int(
+            config.get("data", {}).get("rare_class_min_test_samples", 30)
+        ),
+    )
     LOGGER.info("Wrote %d figures to %s", len(paths), figures_dir)
 
 

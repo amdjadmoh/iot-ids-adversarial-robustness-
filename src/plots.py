@@ -234,11 +234,27 @@ def plot_attack_curves(results_dir: Path, figures_dir: Path) -> list[Path]:
 
 
 def plot_defense_tradeoff(results_dir: Path, figures_dir: Path) -> list[Path]:
+    """Plot clean cost and robustness as matched-epsilon comparisons.
+
+    The left panel reports clean accuracy and accuracy under PGD at one shared
+    epsilon; the right panel shows the whole robustness curve. Comparing a
+    baseline at the largest epsilon with a defense at a smaller one would make
+    the defense look better than it is, so every bar is measured at the same
+    epsilon.
+    """
     path = results_dir / "defense_metrics.csv"
     if not path.exists():
         LOGGER.warning("Skipping defense trade-off; %s is missing", path)
         return []
     frame = pd.read_csv(path)
+    attack_path = results_dir / "attack_metrics.csv"
+    baseline_frame = (
+        pd.read_csv(attack_path)
+        if attack_path.exists()
+        else pd.DataFrame(columns=["target", "model", "attack", "epsilon"])
+    )
+    has_baseline_attacks = "attack" in baseline_frame.columns
+
     paths: list[Path] = []
     for target in _ordered_present(frame["target"], TARGET_ORDER):
         subset = frame[
@@ -246,10 +262,17 @@ def plot_defense_tradeoff(results_dir: Path, figures_dir: Path) -> list[Path]:
         ]
         if subset.empty:
             continue
-        labels: list[str] = []
-        clean_values: list[float] = []
-        adversarial_values: list[float] = []
-        for (defense, parameter), group in sorted(
+        baseline_pgd = (
+            baseline_frame[
+                (baseline_frame["target"] == target)
+                & (baseline_frame["model"] == "mlp")
+                & (baseline_frame["attack"] == "pgd")
+            ].sort_values("epsilon")
+            if has_baseline_attacks
+            else pd.DataFrame()
+        )
+
+        groups = sorted(
             subset.groupby(["defense", "defense_param"]),
             key=lambda item: (
                 DEFENSE_ORDER.index(item[0][0])
@@ -257,9 +280,41 @@ def plot_defense_tradeoff(results_dir: Path, figures_dir: Path) -> list[Path]:
                 else len(DEFENSE_ORDER),
                 item[0][1],
             ),
-        ):
-            clean_rows = group[group["attack"] == "clean"]
+        )
+
+        shared: set[float] | None = None
+        if not baseline_pgd.empty:
+            shared = set(baseline_pgd["epsilon"].tolist())
+        for _, group in groups:
             pgd_rows = group[group["attack"] == "pgd"]
+            if pgd_rows.empty:
+                continue
+            epsilons = set(pgd_rows["epsilon"].tolist())
+            shared = epsilons if shared is None else shared & epsilons
+        bar_epsilon = (
+            max(shared)
+            if shared
+            else float(subset["epsilon"].max())
+        )
+
+        labels: list[str] = []
+        clean_values: list[float] = []
+        robust_values: list[float] = []
+        curves: list[tuple[str, pd.DataFrame, str | None]] = []
+
+        if not baseline_pgd.empty:
+            baseline_row = baseline_pgd[baseline_pgd["epsilon"] == bar_epsilon]
+            if not baseline_row.empty:
+                labels.append("no defense")
+                clean_values.append(float(baseline_row["clean_accuracy"].iloc[0]))
+                robust_values.append(
+                    float(baseline_row["adversarial_accuracy"].iloc[0])
+                )
+            curves.append(("no defense", baseline_pgd, "black"))
+
+        for (defense, parameter), group in groups:
+            clean_rows = group[group["attack"] == "clean"]
+            pgd_rows = group[group["attack"] == "pgd"].sort_values("epsilon")
             if clean_rows.empty or pgd_rows.empty:
                 continue
             if defense == "adversarial_training":
@@ -268,39 +323,54 @@ def plot_defense_tradeoff(results_dir: Path, figures_dir: Path) -> list[Path]:
                 label = f"squeeze {int(parameter)}-bit"
             else:
                 label = f"{defense} {parameter:g}"
+            at_bar = pgd_rows[pgd_rows["epsilon"] == bar_epsilon]
+            if at_bar.empty:
+                continue
             labels.append(label)
-            clean_values.append(
-                float(clean_rows["clean_accuracy"].iloc[0])
-            )
-            adversarial_values.append(
-                float(pgd_rows["adversarial_accuracy"].min())
-            )
+            clean_values.append(float(clean_rows["clean_accuracy"].iloc[0]))
+            robust_values.append(float(at_bar["adversarial_accuracy"].iloc[0]))
+            curves.append((label, pgd_rows, None))
         if not labels:
             continue
 
+        figure, (left, right) = plt.subplots(1, 2, figsize=(12.5, 4.8))
         positions = np.arange(len(labels))
         width = 0.38
-        figure, axis = plt.subplots(
-            figsize=(max(7.0, 1.8 * len(labels)), 4.5)
-        )
-        axis.bar(
+        left.bar(
             positions - width / 2,
             clean_values,
             width,
             label="Clean accuracy",
         )
-        axis.bar(
+        left.bar(
             positions + width / 2,
-            adversarial_values,
+            robust_values,
             width,
-            label="Worst PGD accuracy",
+            label=f"PGD accuracy (eps={bar_epsilon:g})",
         )
-        axis.set_xticks(positions)
-        axis.set_xticklabels(labels, rotation=20, ha="right")
-        axis.set_ylabel("Accuracy")
-        axis.set_ylim(0.0, 1.0)
-        axis.set_title(f"Defense trade-off ({target})")
-        axis.legend(fontsize=8)
+        left.set_xticks(positions)
+        left.set_xticklabels(labels, rotation=20, ha="right")
+        left.set_ylabel("Accuracy")
+        left.set_ylim(0.0, 1.0)
+        left.set_title(f"Clean cost and robustness at eps={bar_epsilon:g}")
+        left.legend(fontsize=8)
+        left.grid(True, axis="y", alpha=0.3)
+
+        for label, curve, colour in curves:
+            right.plot(
+                curve["epsilon"],
+                curve["adversarial_accuracy"],
+                marker="o",
+                color=colour,
+                label=label,
+            )
+        right.set_xlabel("Epsilon (scaled L-infinity)")
+        right.set_ylabel("PGD accuracy")
+        right.set_ylim(0.0, 1.0)
+        right.set_title("Robustness across the perturbation budget")
+        right.grid(True, alpha=0.3)
+        right.legend(fontsize=7)
+        figure.suptitle(f"Defense trade-off ({target})")
         paths.append(
             _save(figure, figures_dir / f"defense_tradeoff_{target}.png")
         )

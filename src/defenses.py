@@ -623,6 +623,9 @@ def run(
                 for attack_name in ATTACK_NAMES:
                     for epsilon in config["attacks"][attack_name]["epsilons"]:
                         epsilon = float(epsilon)
+                        # Adaptive evaluation: the attack is regenerated against
+                        # the adversarially trained model, not replayed from the
+                        # baseline model.
                         adversarial_scaled = _generate_attack(
                             attack_name,
                             model,
@@ -839,6 +842,16 @@ def run(
             int(bits)
             for bits in config["defenses"]["feature_squeezing"]["bit_depths"]
         ],
+        "feature_squeezing_acceptance_bit_depth": acceptance_bits,
+        "feature_squeezing_acceptance_tolerance": acceptance_tolerance,
+        "adversarial_training_attack_generation": (
+            "adaptive: every attack is regenerated against the defended model"
+        ),
+        "feature_squeezing_attack_generation": (
+            "transfer: attacks are generated on the undefended MLP and then "
+            "passed through the quantizer, so squeezing is evaluated "
+            "non-adaptively"
+        ),
         "device": str(device),
         "test_rows": int(len(test_frame)),
     }

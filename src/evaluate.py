@@ -289,6 +289,91 @@ def transfer_summary(frame: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def defense_matched_epsilon_summary(
+    defense_frame: pd.DataFrame,
+    attack_frame: pd.DataFrame,
+) -> pd.DataFrame:
+    """Compare baselines and defended models under the same attack and epsilon.
+
+    Reporting a baseline attack at one epsilon against a defended model at a
+    smaller epsilon overstates the defense, so every comparison here is a join
+    on (target, attack, epsilon).
+    """
+    defense_required = {
+        "target",
+        "defense",
+        "defense_param",
+        "model",
+        "attack",
+        "epsilon",
+        "clean_accuracy",
+        "adversarial_accuracy",
+    }
+    attack_required = {
+        "target",
+        "model",
+        "attack",
+        "epsilon",
+        "clean_accuracy",
+        "adversarial_accuracy",
+    }
+    missing_defense = sorted(defense_required - set(defense_frame.columns))
+    if missing_defense:
+        raise ValueError(
+            f"Defense metrics are missing columns: {missing_defense}"
+        )
+    missing_attack = sorted(attack_required - set(attack_frame.columns))
+    if missing_attack:
+        raise ValueError(f"Attack metrics are missing columns: {missing_attack}")
+
+    attacks = attack_frame[
+        (attack_frame["model"] == "mlp")
+        & (attack_frame["attack"] != "random_noise")
+    ][
+        [
+            "target",
+            "attack",
+            "epsilon",
+            "clean_accuracy",
+            "adversarial_accuracy",
+        ]
+    ].rename(
+        columns={
+            "clean_accuracy": "baseline_clean_accuracy",
+            "adversarial_accuracy": "baseline_adversarial_accuracy",
+        }
+    )
+    defenses = defense_frame[defense_frame["model"] == "mlp"][
+        [
+            "target",
+            "defense",
+            "defense_param",
+            "attack",
+            "epsilon",
+            "clean_accuracy",
+            "adversarial_accuracy",
+        ]
+    ].rename(
+        columns={
+            "clean_accuracy": "defended_clean_accuracy",
+            "adversarial_accuracy": "defended_adversarial_accuracy",
+        }
+    )
+
+    merged = defenses.merge(attacks, on=["target", "attack", "epsilon"], how="inner")
+    if merged.empty:
+        return merged
+    merged["clean_accuracy_cost"] = (
+        merged["baseline_clean_accuracy"] - merged["defended_clean_accuracy"]
+    )
+    merged["robust_gain"] = (
+        merged["defended_adversarial_accuracy"]
+        - merged["baseline_adversarial_accuracy"]
+    )
+    merged = merged.sort_values(
+        ["target", "defense", "defense_param", "attack", "epsilon"]
+    )
+    return merged.reset_index(drop=True)
 
 
 def write_summary(results_dir: Path) -> list[Path]:
@@ -325,6 +410,22 @@ def write_summary(results_dir: Path) -> list[Path]:
             summary["transfer_summary"] = transfer.to_dict(orient="records")
     else:
         LOGGER.warning("Missing attack metrics: %s", attack_path)
+
+    defense_path = results_dir / "defense_metrics.csv"
+    if defense_path.exists() and attack_frame is not None:
+        matched = defense_matched_epsilon_summary(
+            pd.read_csv(defense_path),
+            attack_frame,
+        )
+        if not matched.empty:
+            matched_path = results_dir / "defense_matched_epsilon.csv"
+            matched.to_csv(matched_path, index=False, float_format="%.6f")
+            paths.append(matched_path)
+            summary["defense_matched_epsilon"] = matched.to_dict(
+                orient="records"
+            )
+    else:
+        LOGGER.warning("Missing defense metrics: %s", defense_path)
 
     if summary:
         summary_path = results_dir / "experiment_summary.json"

@@ -11,6 +11,7 @@ from src.evaluate import (
     benign_class_index,
     compute_metrics,
     confusion_matrix_frame,
+    defense_matched_epsilon_summary,
     per_class_recall_frame,
     transfer_summary,
     worst_case_attack_summary,
@@ -210,6 +211,38 @@ def test_transfer_summary_is_empty_without_a_noise_control() -> None:
     assert transfer_summary(frame).empty
 
 
+def test_defense_matched_epsilon_joins_on_the_same_epsilon() -> None:
+    attack_frame = pd.DataFrame(
+        [
+            _attack_row(attack="pgd", epsilon=0.05, clean_accuracy=0.90, adversarial_accuracy=0.40),
+            _attack_row(attack="pgd", epsilon=0.10, clean_accuracy=0.90, adversarial_accuracy=0.10),
+        ]
+    )
+    defense_frame = pd.DataFrame(
+        [
+            {
+                "target": "binary",
+                "defense": "adversarial_training",
+                "defense_param": 0.02,
+                "model": "mlp",
+                "attack": "pgd",
+                "epsilon": 0.05,
+                "clean_accuracy": 0.85,
+                "adversarial_accuracy": 0.70,
+            }
+        ]
+    )
+
+    matched = defense_matched_epsilon_summary(defense_frame, attack_frame)
+    row = matched.iloc[0]
+
+    assert len(matched) == 1
+    assert row["epsilon"] == 0.05
+    assert row["baseline_adversarial_accuracy"] == 0.40
+    assert np.isclose(row["clean_accuracy_cost"], 0.05)
+    assert np.isclose(row["robust_gain"], 0.30)
+
+
 def test_write_summary_writes_traceable_files(tmp_path: Path) -> None:
     results = tmp_path / "results"
     results.mkdir()
@@ -241,28 +274,24 @@ def test_write_summary_writes_traceable_files(tmp_path: Path) -> None:
         [
             {
                 "target": "binary",
+                "defense": "adversarial_training",
+                "defense_param": 0.02,
                 "model": "mlp",
                 "attack": "pgd",
                 "epsilon": 0.05,
-                "clean_accuracy": 0.9,
-                "adversarial_accuracy": 0.3,
-                "accuracy_drop": 0.6,
-                "clean_macro_f1": 0.8,
-                "adversarial_macro_f1": 0.2,
-                "macro_f1_drop": 0.6,
-                "clean_macro_recall": 0.8,
-                "adversarial_macro_recall": 0.2,
-                "macro_recall_drop": 0.6,
-                "attack_success_rate": 0.7,
+                "clean_accuracy": 0.85,
+                "adversarial_accuracy": 0.55,
             }
         ]
-    ).to_csv(results / "attack_metrics.csv", index=False)
+    ).to_csv(results / "defense_metrics.csv", index=False)
 
     paths = write_summary(results)
 
     assert {path.name for path in paths} == {
         "baseline_test_summary.csv",
         "attack_worst_case.csv",
+        "transfer_summary.csv",
+        "defense_matched_epsilon.csv",
         "experiment_summary.json",
     }
     assert all(path.exists() for path in paths)

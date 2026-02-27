@@ -28,8 +28,12 @@ labels:
 split:
   val_fraction: 0.15
   test_fraction: 0.15
-  # Keep all rows from a capture file in one split when possible.
-  holdout_by_capture: true
+  # Only consulted when the loader has to create splits itself, i.e. when the
+  # raw directory holds per-capture CSVs and no train/validation/test files.
+  # The release used for this study already ships train.csv, validation.csv and
+  # test.csv with one capture per split, so those roles are adopted verbatim and
+  # no capture-level holdout takes place.
+  capture_holdout_when_splitting: true
 
 preprocessing:
   scale_for_mlp: true

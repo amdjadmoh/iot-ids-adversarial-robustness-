@@ -67,7 +67,7 @@ def config(tmp_path: Path, raw_dir: Path) -> dict[str, Any]:
         "split": {
             "val_fraction": 0.2,
             "test_fraction": 0.2,
-            "holdout_by_capture": True,
+            "capture_holdout_when_splitting": True,
         },
         "paths": {
             "results": str(tmp_path / "results"),
@@ -128,11 +128,45 @@ def test_split_keeps_captures_intact(config: dict[str, Any]) -> None:
 
 
 def test_row_split_when_capture_holdout_disabled(config: dict[str, Any]) -> None:
-    config["split"]["holdout_by_capture"] = False
+    config["split"]["capture_holdout_when_splitting"] = False
 
     frame = split_dataset(load_ciciot2023(config), config)
 
     assert set(frame["split"]) == {"train", "val", "test"}
+
+
+def test_pre_split_files_are_adopted_verbatim(tmp_path: Path) -> None:
+    raw = tmp_path / "presplit"
+    for name in ("train", "validation", "test"):
+        (raw / name).mkdir(parents=True)
+        _write_capture(raw / name / f"{name}.csv", BENIGN_LABEL, 12, seed=1)
+    presplit_config: dict[str, Any] = {
+        "seed": 5,
+        "data": {
+            "raw_dir": str(raw),
+            "processed_dir": str(tmp_path / "processed"),
+            "file_glob": "*.csv",
+            "label_column": "Label",
+            "sample_size": None,
+            "read_chunksize": 5,
+            "drop_columns": [],
+        },
+        "labels": {"multiclass": 34, "family": 8, "binary": 2},
+        "split": {
+            "val_fraction": 0.2,
+            "test_fraction": 0.2,
+            "capture_holdout_when_splitting": True,
+        },
+    }
+
+    frame = split_dataset(load_ciciot2023(presplit_config), presplit_config)
+
+    assignment = frame.groupby("source_file")["split"].first().to_dict()
+    assert assignment == {
+        "test.csv": "test",
+        "train.csv": "train",
+        "validation.csv": "val",
+    }
 
 
 def test_class_count_frame_reports_every_target_and_flags_rare_classes() -> None:

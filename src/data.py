@@ -1,11 +1,19 @@
-"""Dataset discovery, loading, sampling, and leakage-aware splitting for CICIoT2023.
+"""Dataset discovery, loading, sampling, and splitting for CICIoT2023.
 
-The official distribution contains one CSV per capture/attack type. Sampling is
-performed per capture file in bounded memory, so the full ~13 GB dataset can be
-processed on a laptop without loading it all into RAM. Splits keep capture files
-intact when a label has at least three files. Labels with one or two files fall
-back to a row-level split and log a warning, because strict capture holdout would
-otherwise leave those labels out of validation or test.
+The loader supports two layouts. The release used in this study already ships
+three files named ``train.csv``, ``validation.csv`` and ``test.csv``; when those
+are present their roles are adopted verbatim and no splitting is performed. That
+means there is *no* capture-level holdout in the reported results: the three
+files are separate captures, so flows from one capture cannot leak across splits,
+but the split itself was fixed by whoever packaged the release and is not
+re-derived here.
+
+For a directory of per-capture CSVs the loader falls back to creating splits:
+sampling is performed per capture file in bounded memory, so the full ~13 GB
+dataset can be processed on a laptop without loading it all into RAM, and capture
+files are kept intact when a label has at least three of them. Labels with one or
+two files fall back to a row-level split and log a warning, because strict
+capture holdout would otherwise leave those labels out of validation or test.
 """
 
 from __future__ import annotations
@@ -470,7 +478,7 @@ def split_dataset(
     frame: pd.DataFrame,
     config: dict[str, Any],
 ) -> pd.DataFrame:
-    """Add a split column, keeping captures intact wherever possible."""
+    """Add a split column, adopting pre-split files when they are recognised."""
     split_cfg = config["split"]
     val_fraction = float(split_cfg["val_fraction"])
     test_fraction = float(split_cfg["test_fraction"])
@@ -500,7 +508,7 @@ def split_dataset(
         LOGGER.info("Split sizes: %s", counts)
         return result
 
-    if not bool(split_cfg.get("holdout_by_capture", True)):
+    if not bool(split_cfg.get("capture_holdout_when_splitting", True)):
         for _, group in frame.groupby("label_multiclass", sort=True):
             parts.append(_row_split(group, val_fraction, test_fraction, rng))
     else:

@@ -73,6 +73,10 @@
     6,
     4
   ],
+  "feature_squeezing_acceptance_bit_depth": 8,
+  "feature_squeezing_acceptance_tolerance": 0.01,
+  "adversarial_training_attack_generation": "adaptive: every attack is regenerated against the defended model",
+  "feature_squeezing_attack_generation": "transfer: attacks are generated on the undefended MLP and then passed through the quantizer, so squeezing is evaluated non-adaptively",
   "device": "cuda",
   "test_rows": 30000
 }

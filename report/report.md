@@ -1,200 +1,474 @@
 # Evaluating the Adversarial Robustness of Machine Learning Intrusion Detectors in IoT Networks
 
-**Author:** amdjadmoh  
-**Context:** Final-Year Cybersecurity Engineering Research Project (PFE Portfolio)  
-**Dataset:** CICIoT2023 (Sampled 200,000 network flows from 7.8M raw records)  
-**Code Repository:** `iot-ids-adversarial`  
+**Author:** amdjadmoh
+**Context:** Final-year Cybersecurity Engineering research project (PFE portfolio)
+**Dataset:** CICIoT2023, 200,000-flow sample drawn from 7,845,673 rows
+**Repository:** `iot-ids-adversarial`
+
+Every figure in this report is generated from a file under `results/`; the code that
+produced each file is named in the text.
 
 ---
 
 ## 1. Introduction and Motivation
 
-Network Intrusion Detection Systems (NIDS) based on machine learning are widely proposed in academic literature to protect Internet of Things (IoT) ecosystems. Because IoT devices operate under stringent compute and battery constraints, host-based security agents are often infeasible, making centralized or edge-based network traffic monitoring the primary line of defense. Standard benchmarks frequently report near-perfect detection accuracy—often exceeding 99%—for algorithms such as Random Forests, Gradient Boosted Trees, and Deep Neural Networks.
+Machine-learning network intrusion detection systems (NIDS) for IoT are usually
+evaluated on clean traffic, where tree ensembles reach accuracy figures above 99% on
+recent benchmarks. Those figures say nothing about an adversary who can choose the
+traffic it sends. A compromised IoT device can pad payloads, slow transmission, and
+insert idle time without changing the attack itself, so the question is not only
+whether accuracy falls but whether the attack stops being detected.
 
-However, in real-world deployments, these headline accuracy metrics can create a false sense of security. First, network datasets are heavily skewed toward high-volume attacks (such as volumetric SYN or UDP floods), meaning that overall accuracy reflects performance on repetitive flood patterns while masking poor recall on stealthy, minority-class intrusions. Second, standard evaluations typically assume a static adversary who transmits attack traffic unchanged. In an adversarial setting, a malicious actor operating a compromised IoT device can modify the traffic characteristics—such as padding packet payloads or altering sending intervals—to evade detection without compromising the attack's operational objective.
+This project measures both, on three detectors, across three label granularities, and
+asks three questions:
 
-In this project, I conduct an empirical study of the adversarial robustness of three representative machine learning classifiers on the recent CICIoT2023 benchmark:
-1. A multi-layer perceptron (MLP) trained on scaled continuous features.
-2. A Random Forest (RF) classifier operating on raw flow statistics.
-3. An Extreme Gradient Boosting (XGBoost) model operating on raw flow statistics.
-
-I investigate three central research questions:
-- **RQ1 (Baseline Performance):** How effectively do these detectors classify attack traffic across 34 specific attack classes, 8 high-level attack families, and a binary benign-versus-malicious task?
-- **RQ2 (Evasion and Transferability):** How resilient are these models against (a) unconstrained gradient-based attacks on the neural surrogate, (b) realistic feature-constrained evasion adhering to network physics, and (c) black-box transfer attacks targeting the non-differentiable tree ensembles?
-- **RQ3 (Defenses and Trade-offs):** Can adversarial training or feature squeezing restore detection robustness, and what cost do these defenses impose on clean-data classification accuracy?
-
----
-
-## 2. Threat Model and Constraint Formulation
-
-A key critique of adversarial machine learning in network security is that gradient-based attacks often produce "adversarial examples" that are physically impossible in real networks—such as negative packet counts, modified protocol flags that break connection handshakes, or forged victim response metrics. To ensure practical relevance, I formulated a strict, domain-consistent threat model.
-
-### 2.1 Attacker Capabilities and Feature Controllability
-The adversary is assumed to control a compromised IoT device within the local network and transmits malicious traffic toward a target. The detector is deployed passively on a network gateway and monitors bidirectional flow statistics.
-
-Under this setup, the 46 features extracted in CICIoT2023 are divided into three categories:
-
-1. **Attacker-Controllable Features (10 features):**
-   - *Packet Sizes:* `Min`, `Max`, `AVG`, `Std`, `Tot size`. An attacker can manipulate payload sizes by appending arbitrary dummy bytes (padding).
-   - *Traffic Rates and Timing:* `Rate`, `Srate`, `flow_duration`, `IAT`, `Number`. The attacker can slow down transmission, insert idle delays between consecutive packets, or extend the total flow duration.
-
-2. **Fixed Features (25 features):**
-   - *Protocol Identifiers:* `Protocol Type`, `TCP`, `UDP`, `ICMP`, `HTTP`, `HTTPS`, `DNS`, `Telnet`, `SMTP`, `SSH`, `IRC`, `DHCP`, `ARP`, `IPv`, `LLC`. The transport and application protocol identities cannot change without altering the core functional behavior of the attack.
-   - *Flags and Headers:* `Header_Length`, `Duration` (IP TTL), and flag indicators (`fin_flag_number`, `syn_flag_number`, `rst_flag_number`, `psh_flag_number`, `ack_flag_number`, `ece_flag_number`, `cwr_flag_number`). Altering TCP control flags invalidates stateful connection tracking.
-   - *Victim-Side Metrics:* `Drate` represents the destination/victim packet response rate, which is outside the sender's direct control.
-
-3. **Derived and Interaction Features (11 features):**
-   - *Recomputed Features:* `Tot sum` represents the total volume of bytes in the flow and is mathematically recomputed during perturbation as $\text{Number} \times \text{AVG}$.
-   - *Frozen Derived Features:* Features such as `Magnitue`, `Radius`, `Covariance`, `Variance`, `Weight`, and specific flag counts (`ack_count`, `syn_count`, etc.) depend on complex bidirectional interactions or per-packet rolling windows. In the constrained attack, these features are frozen at their original values, which acts as a conservative bound on attacker capabilities and is documented as a methodological constraint.
-
-### 2.2 Directional Rules and Physical Invariants
-Beyond feature classification, network physics impose strict directional bounds on how features may change:
-- **Monotonic Size Increases:** An attacker can add padding to packets, but cannot reduce a packet below its minimum functional payload size. Thus, $\text{Size}_{\text{adv}} \ge \text{Size}_{\text{clean}}$.
-- **Monotonic Rate Reductions:** Transmission rates are bounded by the device's physical network interface. An attacker can deliberately delay packets to decrease sending rates, but cannot arbitrarily exceed interface bandwidth. Hence, $\text{Rate}_{\text{adv}} \le \text{Rate}_{\text{clean}}$, while inter-arrival time ($\text{IAT}$) and $\text{flow\_duration}$ can only increase.
-- **Physical Invariants:** All flow measurements must remain strictly non-negative ($\ge 0$). In addition, size relations must maintain internal mathematical consistency: $\text{Min} \le \text{AVG} \le \text{Max}$ and $\text{Min} \le \text{Tot size} \le \text{Max}$.
+- **RQ1** — How well do XGBoost, Random Forest, and an MLP classify IoT attack traffic
+  on CICIoT2023 (34-class, 8-family, and binary settings)?
+- **RQ2** — How much do accuracy and attack-class recall drop under (a) unconstrained
+  FGSM/PGD on the MLP, (b) feature-constrained evasion using only attacker-controlled
+  features, and (c) transfer of MLP adversarial examples to XGBoost and Random Forest?
+  How many *detected attacks* become benign in each case?
+- **RQ3** — Do adversarial training and feature squeezing restore robustness, and
+  what is the clean-data cost?
 
 ---
 
-## 3. Experimental Methodology and Implementation
+## 2. Threat Model
 
-### 3.1 Dataset Preprocessing and Split Design
-The experimental pipeline was evaluated on the official CICIoT2023 dataset. The raw dataset contains 169 capture files totaling over 7.8 million network flow records across 34 categories (33 attack types and 1 benign class).
+### 2.1 Controllability
 
-Processing the complete 13 GB dataset in memory is impractical on standard workstation hardware. I implemented a reservoir-based chunked streaming loader that samples files in fixed-size batches (250,000 rows). To prevent rare attacks (such as `Uploading_Attack`, `Recon-PingSweep`, and `Backdoor_Malware`) from disappearing due to uniform sub-sampling, the loader enforces a stratified retention rule that guarantees representation for minority classes.
+The attacker controls a compromised IoT device sending traffic toward a victim, and
+the detector runs passively on the gateway. Of the 46 CICIoT2023 features
+(`src/features.py`):
 
-A balanced subsample of 200,000 flows was constructed, partitioned into:
-- **Training set:** 140,000 flows (70%)
-- **Validation set:** 30,000 flows (15%)
-- **Test set:** 30,000 flows (15%)
+- **10 controllable** — `Min`, `Max`, `AVG`, `Std`, `Tot size`, `Rate`, `Srate`,
+  `IAT`, `flow_duration`, `Number`. Payload padding changes sizes; delaying packets
+  changes rates, inter-arrival times and flow duration.
+- **25 fixed** — protocol identifiers and application ports (`Protocol Type`, `TCP`,
+  `UDP`, `ICMP`, `HTTP`, `HTTPS`, `DNS`, `Telnet`, `SMTP`, `SSH`, `IRC`, `DHCP`,
+  `ARP`, `IPv`, `LLC`), `Header_Length`, `Duration` (IP TTL), the seven TCP flag
+  numbers, and `Drate`, which is the victim's inbound rate.
+- **11 derived** — `ack_count`, `syn_count`, `fin_count`, `urg_count`, `rst_count`,
+  `Tot sum`, `Magnitue`, `Radius`, `Covariance`, `Variance`, `Weight`. `Tot sum` is
+  recomputed as `Number × AVG`; the rest are frozen during constrained evasion because
+  their dependence on per-packet padding has no closed form here.
 
-Splits strictly preserve capture-source integrity to prevent data leakage between evaluation partitions.
+Because CICIoT2023 aggregates both directions of a flow, size and timing features are
+only partly sender-controlled whenever the victim replies (Section 6).
 
-### 3.2 Model Architectures and Training Setup
-I implemented three baseline classifiers:
-1. **Random Forest:** Configured with 300 estimators, a minimum leaf sample threshold of 2, and parallel execution across all CPU cores.
-2. **XGBoost:** Configured with 400 boosted trees, maximum depth of 6, learning rate of 0.1, sub-sampling ratio of 0.9, and the histogram-based split finder (`tree_method='hist'`).
-3. **Multilayer Perceptron (MLP):** A feed-forward architecture with two hidden layers ($128 \to 64$), ReLU activations, dropout regularization ($p=0.2$), and an output linear projection. Features were standardized via training-set medians and standard deviations, with values clipped to $[-8.0, 8.0]$. The network was trained for 30 epochs using AdamW ($\text{lr}=10^{-3}$, weight decay $= 10^{-4}$, batch size $= 512$) on an NVIDIA GeForce RTX 3060 Laptop GPU using PyTorch with CUDA acceleration. The model checkpoint with the highest validation macro F1-score was retained for evaluation.
+### 2.2 Validity constraints
 
-### 3.3 Attack and Defense Algorithms
-- **Unconstrained Attacks:** Fast Gradient Sign Method (FGSM) and Projected Gradient Descent (PGD, 20 steps, step size $\alpha = 0.25\epsilon$) were evaluated across perturbation budgets $\epsilon \in \{0.005, 0.01, 0.02, 0.05, 0.10\}$ in the normalized feature space.
-- **Constrained PGD:** At each iteration, the gradient update was applied in the scaled space, inverted back to raw feature units, projected onto the valid threat-model constraints (clamping fixed features, enforcing monotonic directional changes, and resolving size ordering), and re-normalized.
-- **Black-Box Transfer:** Adversarial samples generated against the differentiable MLP were passed directly to the frozen Random Forest and XGBoost models to test cross-model transferability.
-- **Defenses:**
-  - *Adversarial Training:* The MLP was retrained from scratch on a balanced composite loss of clean and FGSM-perturbed samples ($\epsilon \in \{0.01, 0.02\}$, 20 epochs).
-  - *Feature Squeezing:* Tested as an inference-time filter by quantizing each feature into discrete bins corresponding to 8-bit, 6-bit, and 4-bit representations.
-
----
-
-## 4. Empirical Results and Discussion
-
-### 4.1 RQ1: Baseline Classification Performance
-
-Table 1 summarizes the performance of the three baseline models evaluated on the held-out test split of 30,000 samples across the three target granularities.
-
-**Table 1: Clean Baseline Performance on Held-Out Test Set**
-
-| Target Granularity | Model | Accuracy | Macro F1 | Weighted F1 | Macro Recall |
-| :--- | :--- | :---: | :---: | :---: | :---: |
-| **Multiclass (34 classes)** | Random Forest | 99.01% | 0.7054 | 0.9890 | 0.6992 |
-| | XGBoost | **99.06%** | 0.6947 | **0.9897** | 0.6928 |
-| | MLP | 91.51% | 0.5937 | 0.9114 | 0.5944 |
-| **Family (8 classes)** | Random Forest | **99.31%** | 0.6851 | **0.9925** | 0.6859 |
-| | XGBoost | 99.24% | **0.6937** | 0.9919 | 0.6869 |
-| | MLP | 98.13% | 0.6328 | 0.9806 | 0.6324 |
-| **Binary (Benign vs. Attack)** | Random Forest | **99.62%** | **0.9578** | **0.9962** | 0.9559 |
-| | XGBoost | 99.56% | 0.9523 | 0.9956 | **0.9605** |
-| | MLP | 99.22% | 0.9152 | 0.9922 | 0.9236 |
-
-#### Analysis:
-On the surface, overall accuracy appears exceptional across all models. In the binary detection setting, both Random Forest and XGBoost exceed 99.5% accuracy with macro F1-scores above 0.95. Even in the 34-class problem, both tree ensembles exceed 99.0% accuracy.
-
-However, examining **macro F1** and **macro recall** reveals an important insight: while weighted metrics remain high because dominant attack types (such as ICMP and UDP floods) are classified with near-total accuracy, performance drops sharply on low-volume attack classes. In the multiclass task, macro F1 drops to 0.7054 for Random Forest and 0.5937 for the MLP. Detailed per-class inspection shows that attacks such as `DictionaryBruteForce`, `SqlInjection`, and `CommandInjection` suffer from frequent false negatives because their volumetric footprints are easily overshadowed by high-rate flood traffic.
+Perturbed values must stay non-negative, integral where the raw feature is integral,
+inside the observed range, and internally consistent: `Min ≤ AVG ≤ Max`,
+`Min ≤ Tot size ≤ Max`, and rates/`IAT`/`Number`/`flow_duration` mutually consistent.
+Sizes may only grow, rates may only fall, and timings may only lengthen. The detector
+is frozen during evaluation; this is feature-space evasion, not poisoning and not
+packet-level crafting.
 
 ---
 
-### 4.2 RQ2: Evasion Attacks and Transferability
+## 3. Methodology
 
-#### 4.2.1 White-Box Evasion on the MLP
-Figure 1 illustrates the degradation in detector accuracy as the perturbation budget $\epsilon$ increases.
+### 3.1 Data and splits
 
-In the multiclass setting, the MLP proves highly fragile to gradient-based perturbations:
-- At a modest perturbation of $\epsilon = 0.02$, multiclass accuracy drops from 91.51% to **61.32%**.
-- At $\epsilon = 0.10$, PGD reduces accuracy to **41.92%** (a 49.59% absolute reduction; Attack Success Rate: 54.20%).
-- In the 8-class family task, clean accuracy begins at 98.13% but falls to **46.57%** under PGD ($\epsilon=0.10$).
-- Conversely, in the binary setting, accuracy remains comparatively high (dropping from 99.22% to 98.53%). This is because shifting an attack sample entirely across the binary boundary into the benign cluster requires altering core protocol identifiers and flag configurations, which are heavily separated in the decision space.
+The release used here ships three files — `train.csv`, `validation.csv`, `test.csv` —
+containing 7,845,673 flows in total. Each file corresponds to a single capture
+(`results/split_summary.json` records `capture_files: 1` per split). The loaders adopt
+those roles verbatim; **no capture-level holdout is performed**, so flows from the same
+capture can appear in training and test. Provenance of this pre-split layout is still
+to be documented (`scripts/download_instructions.md` carries a TODO), and the effect
+on absolute accuracy is stated in Section 6.
 
-#### 4.2.2 Realistic Feature-Constrained Evasion
-When applying the constrained PGD algorithm—where only packet sizes can increase and sending rates decrease, with all protocol flags and derived metrics strictly clamped:
-- Multiclass accuracy on the MLP falls from **91.51% to 42.65%** ($\Delta = 48.86\%$, Attack Success Rate: **53.40%**).
-- Family classification accuracy drops from **98.13% to 45.62%** ($\Delta = 52.51\%$, Attack Success Rate: **53.52%**).
+From those files, 200,000 rows are sampled proportionally per file (seed 42), giving
+140,000 training, 30,000 validation and 30,000 test flows with all 34 labels present.
+Per-split counts are written to `results/test_class_counts.csv`; 12 target/class
+combinations have fewer than 30 test samples and are flagged there and in the per-class
+recall files.
 
-This is a notable finding: **an attacker does not need to violate network protocols or forge packet headers to evade detection.** By simply padding packet lengths and slightly delaying transmissions, an adversary can manipulate the flow statistics enough to push the classifier into misclassifying one attack type as another, defeating fine-grained attribution and automated response systems.
+### 3.2 Models
 
-#### 4.2.3 Black-Box Transfer to Tree Detectors
-To test whether these vulnerabilities are limited to neural networks or represent broader geometric weaknesses in the feature space, I transferred adversarial examples generated against the surrogate MLP to the frozen Random Forest and XGBoost models.
+- **Random Forest** — 300 trees, `min_samples_leaf=2`, raw features.
+- **XGBoost** — 400 trees, depth 6, learning rate 0.1, subsample 0.9, colsample 0.9,
+  raw features.
+- **MLP** — two hidden layers (128, 64), dropout 0.2, standardized inputs (training
+  medians and standard deviations, clipped to ±8), AdamW at 1e-3 with weight decay
+  1e-4, batch 512, up to 30 epochs, best validation macro F1 retained. Torch 2.14.1
+  with CUDA on an RTX 3060 Laptop.
 
-**Table 2: Transferability of Surrogate Adversarial Examples to Tree Detectors ($\epsilon = 0.10$)**
+Trees consume raw features and the MLP consumes scaled features; preprocessing is fit
+on the training split only.
 
-| Target | Model | Attack Variant | Clean Accuracy | Adversarial Accuracy | Accuracy Drop |
-| :--- | :--- | :--- | :---: | :---: | :---: |
-| **Multiclass** | Random Forest | Unconstrained PGD | 99.01% | **29.16%** | **69.85%** |
-| | XGBoost | Unconstrained PGD | 99.06% | **16.96%** | **82.10%** |
-| | Random Forest | Constrained PGD | 99.01% | **81.87%** | 17.14% |
-| | XGBoost | Constrained PGD | 99.06% | **83.88%** | 15.18% |
-| **Family** | Random Forest | Unconstrained PGD | 99.31% | **25.88%** | **73.43%** |
-| | XGBoost | Unconstrained PGD | 99.24% | **9.41%** | **89.83%** |
-| | Random Forest | Constrained PGD | 99.31% | **82.72%** | 16.59% |
-| | XGBoost | Constrained PGD | 99.24% | **81.49%** | 17.75% |
+### 3.3 Attacks and metrics
 
-The transfer results are striking. Under unconstrained PGD transfer, XGBoost accuracy collapses from **99.06% to 16.96%**, and Random Forest drops from **99.01% to 29.16%**. Even though tree-based algorithms construct orthogonal axis-aligned decision boundaries rather than smooth hyperplanes, the gradient directions computed on the MLP effectively identify shared regions in the continuous statistical space where the training data is sparse.
+- **FGSM** and **PGD** (20 steps, step 0.25ε, random start) on the MLP at
+  ε ∈ {0.005, 0.01, 0.02, 0.05, 0.10} in scaled space.
+- **Constrained PGD** — the same gradient loop, projected back onto raw feature units
+  and then onto the Section 2.2 constraints, at ε ∈ {0.01, 0.02, 0.05, 0.10}.
+- **Random-noise control** — uniform random signs × ε through the same clipping path as
+  FGSM/PGD, seeded from the config (seed 42), at the same five budgets
+  (`results/attack_manifest.json`, `random_noise_seed`). It is evaluated on every
+  model and target, and all transfer statements are made against it.
+- **Transfer** — examples generated on the MLP are passed to the frozen trees.
 
-Under the realistic constrained attack, the transfer effect is more moderate but still causes a significant **15% to 18% accuracy drop** on the tree models without any prior knowledge of the tree architectures.
+Reported metrics (`src/evaluate.py`): accuracy, macro recall/F1, attack success rate
+(clean-correct samples now wrong), and **evasion rate** — among rows that are true
+attacks *and* classified as attacks before perturbation, the fraction predicted benign
+afterwards (benign = `BenignTraffic` in multiclass, `Benign` in family and binary). The
+evasion rate is the primary RQ2 metric because a wrong attack label still raises an
+alert.
 
----
+### 3.4 Defenses
 
-### 4.3 RQ3: Defense Robustness and Trade-Off Analysis
-
-I evaluated two defense strategies against a strong PGD attack ($\epsilon = 0.05$): adversarial retraining and feature squeezing.
-
-**Table 3: Robustness and Clean Accuracy Trade-Offs on the MLP Detector (PGD $\epsilon=0.05$)**
-
-| Target Granularity | Defense Strategy | Configuration | Clean Accuracy | Robust Accuracy | Clean Penalty ($\Delta$) |
-| :--- | :--- | :---: | :---: | :---: | :---: |
-| **Multiclass** | *Undefended Baseline* | — | 91.51% | 41.92% | — |
-| | Adversarial Training | $\epsilon = 0.01$ | 81.21% | 72.36% | -10.30% |
-| | Adversarial Training | $\epsilon = 0.02$ | 80.40% | **72.81%** | -11.11% |
-| | Feature Squeezing | 8-bit | 77.27% | 42.61% | -14.24% |
-| | Feature Squeezing | 6-bit | 82.13% | 43.43% | -9.38% |
-| | Feature Squeezing | 4-bit | 58.95% | 49.70% | -32.56% |
-| **Family** | *Undefended Baseline* | — | 98.13% | 48.06% | — |
-| | Adversarial Training | $\epsilon = 0.01$ | 86.13% | 77.92% | -12.00% |
-| | Adversarial Training | $\epsilon = 0.02$ | 85.75% | **81.01%** | -12.38% |
-| | Feature Squeezing | 8-bit | 69.70% | 48.13% | -28.43% |
-| | Feature Squeezing | 6-bit | 74.88% | 47.84% | -23.25% |
-| | Feature Squeezing | 4-bit | 61.15% | 52.59% | -36.98% |
-
-#### Defense Comparison:
-1. **Adversarial Training is Effective but Costly:** Incorporating FGSM perturbations into the training loop substantially improves worst-case robustness. On multiclass classification, adversarial training at $\epsilon=0.02$ raises robust accuracy under PGD from **41.92% to 72.81%** (a gain of +30.89 percentage points). However, this robustness comes at a measurable cost: clean test accuracy drops by **11.11%** (from 91.51% to 80.40%). In an operational security center, an 11% penalty in clean classification could translate to thousands of misclassified benign flows per day.
-2. **Feature Squeezing Fails on Tabular Network Flows:** Feature squeezing is often proposed in computer vision because natural images tolerate spatial color quantization well. In contrast, for network flow statistics, continuous features such as inter-arrival times, standard deviations, and byte rates carry high dynamic range information. Squeezing continuous values into discrete 4-bit or 6-bit representations degrades clean accuracy significantly (down to 58.95% on 4-bit multiclass) while providing minimal gain in adversarial robustness (~49.70%). Feature squeezing is therefore poorly suited as an evasion defense for flow-based NIDS.
-
----
-
-## 5. Limitations and Practical Constraints
-
-To maintain research integrity, several methodological limitations must be acknowledged:
-1. **Flow-Level vs. Packet-Level Crafting:** This study operates in the feature space of flow statistics rather than the raw packet stream. While I enforced directional and physical constraints, translating these feature deltas into live network packets involves real-world obstacles like MTU limits, OS TCP stack retransmissions, and intermediate network middlebox rewriting.
-2. **Frozen Complex Aggregates:** Due to the absence of closed-form formulas relating individual packet padding to bidirectional variance metrics (`Radius`, `Covariance`, `Magnitue`), these features were kept frozen during constrained evasion. A real-world adversary who dynamically measures victim ACKs might alter these features as well, meaning the evasion rates reported here represent a lower bound.
-3. **Imbalanced Benchmark Sampling:** Even after stratified sampling, minority classes in CICIoT2023 represent fewer than 100 samples in the test split. While this reflects real-world network traffic distributions, it increases metric variance on the rarest attack types.
+- **Adversarial training** — the MLP is retrained from scratch on a 50/50 mix of clean
+  and FGSM-perturbed samples, ε_train ∈ {0.01, 0.02}, 20 epochs. Attacks against the
+  defended model are **adaptive**: every attack is regenerated against that network
+  (`results/defense_manifest.json`,
+  `adversarial_training_attack_generation`), so no stale examples are reused.
+- **Feature squeezing** — per-feature quantile-space quantization at 8, 6 and 4 bits,
+  with bin edges fitted on the training split only. Squeezing is probed
+  **non-adaptively**: attacks are generated on the undefended MLP and then quantized
+  (`feature_squeezing_attack_generation`). A hard acceptance gate
+  (`results/squeezing_acceptance.csv`) requires 8-bit clean accuracy to stay within one
+  point of the unsqueezed model; the pipeline fails if it does not. An earlier
+  log1p-space quantizer failed that gate and was discarded.
 
 ---
 
-## 6. Conclusion and Future Directions
+## 4. Results
 
-This project demonstrates that while tree ensembles and neural networks achieve impressive baseline accuracy on modern IoT intrusion benchmarks, they are fundamentally vulnerable to adversarial evasion. 
+### 4.1 RQ1 — clean baselines
 
-Crucially, **evasion does not require forging packet headers or breaking protocol rules.** An attacker operating within legitimate network physics—simply adding dummy payload bytes and spacing out packet transmissions—can reduce neural network multiclass accuracy by over 48 percentage points and trigger transfer degradation in excess of 69 percentage points on Random Forests and 82 percentage points on XGBoost. Furthermore, while adversarial training provides meaningful defensive utility, it imposes an operational tax of approximately 11% on clean classification accuracy, and heuristic defenses like feature squeezing prove ineffective on tabular network features.
+**Table 1** (`results/baseline_test_summary.csv`, 30,000 test flows):
 
-### Suggested Extensions for Internship Research:
-- **Online Packet Crafting:** Implementing a software-defined networking (SDN) or Scapy-based testbed to inject live adversarial packets and verify if hardware network interface cards (NICs) yield the same evasion rates observed in feature space.
-- **Robust Feature Selection:** Investigating whether training solely on protocol invariants (while systematically excluding attacker-controllable packet sizes and rate metrics) can yield an evasion-resistant, low-overhead IoT detector.
-- **Certified Robustness:** Exploring randomized smoothing or bound propagation techniques to provide provable robustness guarantees for tabular network intrusion architectures.
+| Target | Model | Accuracy | Macro F1 | Weighted F1 | Macro recall |
+| :--- | :--- | ---: | ---: | ---: | ---: |
+| Multiclass (34) | Random Forest | 99.01% | 0.7054 | 0.9890 | 0.6992 |
+| Multiclass (34) | XGBoost | **99.06%** | 0.6947 | **0.9897** | 0.6928 |
+| Multiclass (34) | MLP | 91.51% | 0.5937 | 0.9114 | 0.5944 |
+| Family (8) | Random Forest | **99.31%** | 0.6851 | **0.9925** | 0.6859 |
+| Family (8) | XGBoost | 99.24% | **0.6937** | 0.9919 | 0.6869 |
+| Family (8) | MLP | 98.13% | 0.6328 | 0.9806 | 0.6324 |
+| Binary | Random Forest | **99.62%** | **0.9578** | **0.9962** | 0.9559 |
+| Binary | XGBoost | 99.56% | 0.9523 | 0.9956 | **0.9605** |
+| Binary | MLP | 99.22% | 0.9152 | 0.9922 | 0.9236 |
+
+Accuracy is near-ceiling, but macro F1 separates the models. Two effects drive the
+0.69–0.71 multiclass macro F1 of the trees and the 0.59 of the MLP, both visible in
+`results/baselines_per_class_recall.csv`:
+
+- **Rare labels.** Ten multiclass classes have fewer than 30 test samples (2–24 each),
+  and eight of them have recall 0.000 for at least one model (`Uploading_Attack` 2,
+  `Recon-PingSweep` 2, `CommandInjection` 3, `Backdoor_Malware` 4, `XSS` 5,
+  `BrowserHijacking` 6, `SqlInjection` 7, `DictionaryBruteForce` 9). A handful of
+  samples cannot support a class, and that is a property of the sample, not of the
+  attack; `DDoS-HTTP_Flood` (18) and `DDoS-SlowLoris` (24) are the two low-support
+  labels that are still classified.
+- **Genuinely confusable classes with adequate support.** MLP recall is 0.000 on
+  `Recon-OSScan` (70 test samples) and 0.220 on `DNS_Spoofing` (109), and 0.508 on
+  `Recon-PortScan` (63) — reconnaissance traffic that resembles benign scanning.
+
+In the family task the macro F1 (0.685–0.694) is dominated by the two rare families:
+`BruteForce` (9 test samples) and `Web` (27) have recall 0.000 under the Random Forest,
+which removes up to 0.25 from the macro average while accuracy stays at 99.31%.
+
+### 4.2 RQ2 — evasion, transfer, and the noise control
+
+#### 4.2.1 Evasion rate
+
+**Table 2** — maximum evasion rate over the tested budgets
+(`results/attack_worst_case.csv`, column `max_evasion_rate`):
+
+| Target | Model | Constrained | FGSM | PGD | Random noise |
+| :--- | :--- | ---: | ---: | ---: | ---: |
+| Binary | Random Forest | 0.01% | 0.13% | 0.13% | 0.18% |
+| Binary | XGBoost | 0.04% | 0.15% | 0.15% | 0.14% |
+| Binary | MLP | 0.04% | 0.37% | 0.39% | 0.07% |
+| Multiclass | Random Forest | 0.11% | 0.50% | 0.48% | 0.45% |
+| Multiclass | XGBoost | 0.13% | 0.25% | 0.24% | 0.24% |
+| Multiclass | MLP | 0.06% | 0.21% | 0.25% | 0.08% |
+| Family | Random Forest | 0.07% | 0.35% | 0.34% | 0.23% |
+| Family | XGBoost | 0.06% | 0.27% | 0.27% | 0.18% |
+| Family | MLP | 0.03% | 0.21% | 0.24% | 0.03% |
+
+No configuration exceeds 0.5%. The largest single value is 0.50% (Random Forest,
+multiclass, FGSM). The evasion population is 29,173 (MLP), 29,251 (Random Forest) and
+29,226 (XGBoost) detected attack flows out of 30,000 test flows, so these percentages
+are not computed on a small denominator.
+
+#### 4.2.2 Accuracy under attack
+
+**Table 3** — accuracy at ε = 0.10 (`results/attack_metrics.csv`):
+
+| Target | Model | Clean | Constrained | FGSM | PGD | Noise |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: |
+| Multiclass | Random Forest | 99.01% | 81.90% | 36.74% | 29.16% | 45.09% |
+| Multiclass | XGBoost | 99.06% | 87.62% | 19.98% | 16.96% | 34.18% |
+| Multiclass | MLP | 91.51% | 42.65% | 42.62% | 41.92% | 66.07% |
+| Family | Random Forest | 99.31% | 83.19% | 10.55% | 25.88% | 58.24% |
+| Family | XGBoost | 99.24% | 82.60% | 9.86% | 9.41% | 47.37% |
+| Family | MLP | 98.13% | 45.62% | 44.23% | 48.06% | 72.14% |
+| Binary | Random Forest | 99.62% | 98.40% | 97.83% | 97.82% | 97.86% |
+| Binary | XGBoost | 99.56% | 98.67% | 97.84% | 97.82% | 97.91% |
+| Binary | MLP | 99.22% | 99.12% | 98.57% | 98.53% | 99.21% |
+
+The MLP loses 49.59 points on multiclass under PGD at this budget
+(attack success rate 0.5420), yet only 0.25% of its detected attacks become benign. The
+damage is label confusion, not detection loss: at ε = 0.10 the multiclass MLP's recall
+on `DDoS-SYN_Flood` falls from 0.911 to 0.004, on `DDoS-SynonymousIP_Flood` from 0.978
+to 0.001, on `DDoS-TCP_Flood` from 0.971 to 0.001 and on `DDoS-UDP_Flood` from 0.903 to
+0.000 (`results/attack_per_class_recall.csv`) — those flows are still classified as
+attacks, just as the wrong one. That is a real operational problem for automated
+response and attack attribution, but it is not evasion.
+
+#### 4.2.3 Transfer is mostly input fragility
+
+**Table 4** — ε = 0.10, MLP-generated examples on frozen trees
+(`results/transfer_summary.csv`):
+
+| Target | Model | Clean | PGD | Random noise | Extra drop vs noise |
+| :--- | :--- | ---: | ---: | ---: | ---: |
+| Multiclass | Random Forest | 99.01% | 29.16% | 45.09% | 15.94 pts |
+| Multiclass | XGBoost | 99.06% | 16.96% | 34.18% | 17.22 pts |
+| Family | Random Forest | 99.31% | 25.88% | 58.24% | 32.36 pts |
+| Family | XGBoost | 99.24% | 9.41% | 47.37% | 37.96 pts |
+| Multiclass | MLP (own attack) | 91.51% | 41.92% | 66.07% | 24.16 pts |
+| Family | MLP (own attack) | 98.13% | 48.06% | 72.14% | 24.08 pts |
+
+Random noise of the same magnitude already costs the trees 41–65 points. The
+gradient-specific part of the drop is therefore 15.9–38.0 points, not the 70–90 points
+the raw numbers suggest. Reporting the raw drop as "transfer" would overstate the
+effect by two to four times.
+
+#### 4.2.4 Realistic constrained evasion barely works
+
+Restricting changes to the 10 controllable features and enforcing Section 2.2 leaves
+evasion at 0.03–0.13% for multiclass and family, and 0.01–0.04% for binary. The trees
+end up *more* accurate under the constrained attack than under random noise at the same
+budget: multiclass Random Forest 81.90% versus 45.09%, XGBoost 87.62% versus 34.18%;
+family 83.19% versus 58.24% and 82.60% versus 47.37%. The corresponding
+`accuracy_drop_vs_noise` values are negative at ε = 0.10 (between −24.95 and −53.44
+points), so the
+constrained attacker is weaker than an attacker who simply adds noise.
+
+The MLP is the exception in accuracy terms — 42.65% on multiclass — because it is
+fragile to any input shift, yet its constrained evasion is 0.06%. In other words, within
+the part of the feature space an IoT device can actually reach, evasion of these
+detectors was not achieved in this study. That is a negative result, and it is the most
+important one here: the large unconstrained drops do not survive contact with the
+threat model.
+
+#### 4.2.5 Binary accuracy loss is false alarms
+
+Under PGD at ε = 0.10 the binary Random Forest's benign recall falls from 91.37% to
+7.91% while its attack recall is unchanged (99.82% → 99.95%); XGBoost goes from 92.37%
+to 10.22% benign recall (attack recall 99.73% → 99.89%); the MLP goes from 85.18% to
+71.65% (attack recall 99.55% → 99.16%). With only two classes, and with evasion of
+detected attacks at or below 0.39%, the accuracy drop is almost entirely benign traffic
+being pushed into the attack class. The operational reading is alert flooding, not
+undetected intrusion — a denial-of-service effect on the analyst rather than on the
+classifier's recall.
+
+### 4.3 RQ3 — defenses
+
+#### 4.3.1 Adversarial training at matching ε
+
+**Tables 5–7** compare the baseline MLP and the adversarially-trained MLPs under PGD at
+the *same* ε (`results/defense_matched_epsilon.csv`), with the clean column included so
+the cost is visible. Attacks on the defended models are regenerated against those
+models (adaptive).
+
+**Table 5 — multiclass, PGD:**
+
+| Model | Clean | ε=0.005 | ε=0.01 | ε=0.02 | ε=0.05 | ε=0.10 |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Baseline | 91.51% | 64.49% | 51.30% | 43.47% | 42.79% | 41.92% |
+| Adv. train ε=0.01 | 81.21% | 80.52% | 80.15% | 79.04% | 72.36% | 57.08% |
+| Adv. train ε=0.02 | 80.40% | 80.20% | 80.00% | 79.67% | 72.81% | 66.71% |
+
+**Table 6 — family, PGD:**
+
+| Model | Clean | ε=0.005 | ε=0.01 | ε=0.02 | ε=0.05 | ε=0.10 |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Baseline | 98.13% | 55.74% | 53.78% | 46.57% | 48.34% | 48.06% |
+| Adv. train ε=0.01 | 86.13% | 84.43% | 83.62% | 82.31% | 77.92% | 69.69% |
+| Adv. train ε=0.02 | 85.75% | 84.10% | 83.79% | 82.96% | 81.01% | 74.22% |
+
+**Table 7 — binary, PGD:**
+
+| Model | Clean | ε=0.005 | ε=0.01 | ε=0.02 | ε=0.05 | ε=0.10 |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Baseline | 99.22% | 99.18% | 99.16% | 99.11% | 98.90% | 98.53% |
+| Adv. train ε=0.01 | 99.18% | 99.16% | 99.14% | 99.08% | 98.93% | 98.66% |
+| Adv. train ε=0.02 | 99.19% | 99.17% | 99.14% | 99.12% | 98.97% | 98.72% |
+
+Adversarial training is the only defense here that works. On multiclass it buys
++29.58 points at ε = 0.05 (ε_train = 0.01) and +24.79 at ε = 0.10 (ε_train = 0.02) for a
+clean cost of 10.29–11.10 points. On family the gains are +29.59 to +32.68 points at
+ε = 0.05 for 12.00–12.38 points of clean accuracy. On binary there is almost nothing to
+gain (+0.03 to +0.19 points) because the baseline is already robust.
+
+#### 4.3.2 Feature squeezing
+
+**Table 8** — the 8-bit acceptance gate
+(`results/squeezing_acceptance.csv`), clean accuracy before and after quantization:
+
+| Target | Model | Clean | 8-bit squeezed | Drop |
+| :--- | :--- | ---: | ---: | ---: |
+| Multiclass | Random Forest | 99.01% | 98.79% | 0.22 pts |
+| Multiclass | XGBoost | 99.06% | 99.04% | 0.02 pts |
+| Multiclass | MLP | 91.51% | 91.42% | 0.09 pts |
+| Family | Random Forest | 99.31% | 99.10% | 0.21 pts |
+| Family | XGBoost | 99.24% | 99.23% | 0.02 pts |
+| Family | MLP | 98.13% | 97.81% | 0.32 pts |
+| Binary | Random Forest | 99.62% | 99.50% | 0.12 pts |
+| Binary | XGBoost | 99.56% | 99.56% | 0.00 pts |
+| Binary | MLP | 99.22% | 99.19% | 0.03 pts |
+
+All nine 8-bit rows pass the 1-point tolerance. The gate is not met at lower depths:
+4-bit fails for all nine pairs and 6-bit fails for seven of nine (the exceptions are the
+multiclass and binary MLP), so 4-bit and 6-bit numbers are reported but not treated as
+usable configurations.
+
+**Table 9** — MLP accuracy on the same PGD examples, before and after quantization
+(`results/defense_matched_epsilon.csv`, `defense = feature_squeezing`):
+
+| Target | Variant | Clean | ε=0.005 | ε=0.05 | ε=0.10 |
+| :--- | :--- | ---: | ---: | ---: | ---: |
+| Multiclass | Unsqueezed | 91.51% | 64.49% | 42.79% | 41.92% |
+| Multiclass | 8-bit | 91.42% | 23.26% | 3.83% | 3.62% |
+| Multiclass | 6-bit | 90.77% | 21.91% | 5.54% | 2.77% |
+| Multiclass | 4-bit | 85.13% | 12.52% | 12.75% | 1.51% |
+| Family | Unsqueezed | 98.13% | 55.74% | 48.34% | 48.06% |
+| Family | 8-bit | 97.81% | 64.89% | 37.33% | 37.57% |
+| Family | 6-bit | 96.48% | 64.22% | 28.14% | 38.45% |
+| Family | 4-bit | 93.70% | 50.72% | 31.10% | 20.91% |
+| Binary | Unsqueezed | 99.22% | 99.18% | 98.90% | 98.53% |
+| Binary | 8-bit | 99.19% | 97.57% | 97.34% | 97.07% |
+| Binary | 6-bit | 98.81% | 97.34% | 97.09% | 96.86% |
+| Binary | 4-bit | 97.73% | 97.46% | 97.38% | 97.28% |
+
+Squeezing does not defend. On multiclass it destroys accuracy on attacked inputs
+(3.83% at ε = 0.05 against 42.79% unsqueezed) while leaving clean accuracy intact — the
+quantizer discards exactly the fine-grained magnitude information the MLP uses, and the
+perturbation survives quantization. On family there is a small gain at ε = 0.005
+(64.89% versus 55.74%) that reverses by ε = 0.05 (37.33% versus 48.34%). On binary it
+costs 1.5–1.8 points at every budget. Since the evaluation is non-adaptive, a real
+attacker who knew about the quantizer could do no worse.
+
+---
+
+## 5. Discussion
+
+Three points follow from the numbers.
+
+1. **Accuracy is a misleading robustness metric for multiclass NIDS.** A 49.59-point
+   accuracy drop coexists with a 0.25% evasion rate. Benchmarks that report only
+   accuracy conflate "the alarm named the wrong attack" with "the attack passed
+   undetected"; the second is what matters for a detector's core function, and it stays
+   at one quarter of one percent here.
+2. **Most of the transfer effect is not transfer.** Random-sign noise at the same
+   budget reproduces 56–79% of the tree accuracy loss. Any transfer claim needs a noise
+   control, otherwise energy that any perturbation would inject is attributed to the
+   gradient.
+3. **Within the threat model, evasion was not achieved.** The constrained attacker —
+   the only one a real IoT device can implement — reaches at best 0.13% evasion and, for
+   trees, is less damaging than noise. The interesting failure mode it does produce is
+   false alarms on benign traffic and misattribution among attacks.
+
+---
+
+## 6. Limitations
+
+1. **No capture-level holdout.** `train.csv`, `validation.csv` and `test.csv` in the
+   release each contain flows from a single capture (`results/split_summary.json`).
+   They are used as shipped, so training and test flows can originate from the same
+   capture. This is the standard caveat for pre-split releases and it makes the clean
+   baselines, and therefore every drop measured against them, **potentially
+   optimistic**. A capture-level re-split is the obvious next check; the provenance of
+   the pre-split layout is still a TODO in `scripts/download_instructions.md`.
+2. **Sample size.** 200,000 flows out of 7,845,673. Sampling is proportional per file,
+   so the label mix is preserved but absolute counts for rare attacks are small.
+3. **Rare classes.** 12 target/class combinations have fewer than 30 test samples
+   (10 multiclass, 2 family). They are neither dropped nor merged; they are hatched in
+   `figures/per_class_recall_*.png` and flagged with `low_test_support` in the result
+   CSVs. Macro F1 is highly sensitive to them — `BruteForce` and `Web` at recall 0.000
+   remove up to 0.25 from the family macro average — and per-class recall for those
+   labels should be read as an anecdote, not an estimate.
+4. **Frozen derived features.** `Magnitue`, `Radius`, `Covariance`, `Variance`,
+   `Weight` and the flag counts are held constant in the constrained attack. A real
+   attacker who measures victim responses could move them, so the constrained results
+   understate what is physically possible.
+5. **Bidirectional aggregates.** CICIoT2023 features combine both directions; with a
+   replying victim, the sender controls less of `Std`, `AVG`, `Rate` and `IAT` than the
+   controllability table implies.
+6. **Feature space only.** Perturbations are applied to flow statistics, not to emitted
+   packets. MTU limits, TCP retransmission, and middlebox rewriting are not modelled,
+   and no live testbed was used.
+7. **Squeezing is evaluated non-adaptively**, which is generous to the defense; the
+   negative result would only get worse under an adaptive attacker.
+8. **Single seed per configuration.** Attacks and training use seed 42. Variance across
+   seeds was not measured, so differences below roughly one point should not be
+   interpreted.
+
+---
+
+## 7. Conclusion
+
+On a 200,000-flow sample of CICIoT2023, all three detectors reach 99%+ accuracy and
+only 0.59–0.71 multiclass macro F1, the latter driven by rare classes. Unconstrained
+gradient attacks move accuracy a long way — 49.59 points on the multiclass MLP, 82.10
+on XGBoost — but the fraction of detected attacks that become benign never exceeds
+0.5%, and the binary accuracy loss is dominated by false alarms on benign traffic
+rather than by missed attacks. After controlling for random noise, genuine transfer to
+the trees is 15.9–38.0 points rather than the 70–90 points the raw numbers imply.
+Feature-constrained evasion, the only variant a real IoT device can carry out, achieves
+at most 0.13% evasion. Adversarial training restores 24.79–32.68 points of adversarial
+accuracy at a cost of 10.29–12.38 clean points and is the only defense that works;
+quantile-space feature squeezing preserves clean accuracy at 8 bits but degrades
+accuracy on attacked inputs.
+
+### Suggested extensions
+
+- **Capture-level re-split** of the raw release to test whether the clean baselines move.
+- **Live packet crafting** (Scapy or an SDN testbed) to verify that the constrained
+  feature deltas can be realised on the wire and that the detector sees what the
+  feature-space simulation assumes.
+- **Detection-preserving metrics**: report "detected vs undetected" separately from
+  "correctly attributed", and track benign false-alarm inflation under attack.
+- **Adaptive squeezing** and randomized smoothing, to test whether the defense failure
+  reported here is intrinsic to tabular flow features.
+
+---
+
+## References
+
+- Neto, E. C. P., Dadkhah, S., Ferreira, R., Zohourian, A., Lu, R., Ghorbani, A. A.
+  *CICIoT2023: A real-time dataset and benchmark for large-scale attacks in IoT
+  environment.* Sensors 23(13):5941, 2023.
+- Goodfellow, I. J., Shlens, J., Szegedy, C. *Explaining and harnessing adversarial
+  examples.* ICLR 2015 (arXiv:1412.6572).
+- Madry, A., Makelov, A., Schmidt, L., Tsipras, D., Vladu, A. *Towards deep learning
+  models resistant to adversarial attacks.* ICLR 2018 (arXiv:1706.06083).
+- Xu, W., Evans, D., Qi, Y. *Feature squeezing: Detecting adversarial examples in deep
+  neural networks.* NDSS 2018.
+- Chen, T., Guestrin, C. *XGBoost: A scalable tree boosting system.* KDD 2016,
+  pp. 785–794.
+- Breiman, L. *Random forests.* Machine Learning 45(1):5–32, 2001.
+- Biggio, B., Corona, I., Maiorca, D., Nelson, B., Šrndić, N., Laskov, P., Giacinto, G.,
+  Roli, F. *Evasion attacks against machine learning at test time.* ECML PKDD 2013,
+  LNCS 8190, pp. 387–402.
+
+---
+
+## Reproducing
+
+```powershell
+.\scripts\run_all.ps1        # data → train → attacks → defenses → evaluate → plots
+.\.venv\Scripts\python.exe -m pytest
+```
+
+Result files quoted above: `baseline_test_summary.csv`, `attack_metrics.csv`,
+`attack_worst_case.csv`, `attack_per_class_recall.csv`, `baselines_per_class_recall.csv`,
+`transfer_summary.csv`, `defense_metrics.csv`, `defense_matched_epsilon.csv`,
+`squeezing_acceptance.csv`, `test_class_counts.csv`, `split_summary.json`,
+`attack_manifest.json`, `defense_manifest.json` (all under `results/`).
